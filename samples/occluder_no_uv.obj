@@ -1,0 +1,6 @@
+# Opaque blocker above samples/single_card.obj. No texture coordinates are needed.
+v -5 -5 0.25
+v 5 -5 0.25
+v 5 5 0.25
+v -5 5 0.25
+f 1 2 3 4

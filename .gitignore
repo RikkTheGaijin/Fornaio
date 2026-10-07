@@ -1,0 +1,7 @@
+.build-tools/
+.deps/
+build/
+dist/
+artifacts/
+aqtinstall.log
+third_party/*/.git/

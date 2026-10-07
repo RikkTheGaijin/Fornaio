@@ -1,0 +1,14 @@
+{
+  "stacked_cards.fbx": {
+    "bounds_diagonal": 283.8591199420071,
+    "triangles": 6
+  },
+  "transformed_cards.fbx": {
+    "bounds_diagonal": 349.66918561949177,
+    "triangles": 6
+  },
+  "hair_400_cards.fbx": {
+    "bounds_diagonal": 419.5242035642483,
+    "triangles": 4800
+  }
+}

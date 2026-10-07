@@ -1,0 +1,9 @@
+[submodule "third_party/optix"]
+	path = third_party/optix
+	url = https://github.com/NVIDIA/optix-dev.git
+[submodule "third_party/stb"]
+	path = third_party/stb
+	url = https://github.com/nothings/stb.git
+[submodule "third_party/ufbx"]
+	path = third_party/ufbx
+	url = https://github.com/ufbx/ufbx.git

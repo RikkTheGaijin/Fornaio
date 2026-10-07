@@ -1,0 +1,13 @@
+<RCC>
+    <qresource prefix="/">
+        <file>fornaio.png</file>
+        <file>arrow_up.png</file>
+        <file>arrow_up@2x.png</file>
+        <file>arrow_up_disabled.png</file>
+        <file>arrow_up_disabled@2x.png</file>
+        <file>arrow_down.png</file>
+        <file>arrow_down@2x.png</file>
+        <file>arrow_down_disabled.png</file>
+        <file>arrow_down_disabled@2x.png</file>
+    </qresource>
+</RCC>
