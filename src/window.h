@@ -1,6 +1,7 @@
 #pragma once
 #include "viewport.h"
 #include "transfer_panel.h"
+#include "uv2.h"
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -8,6 +9,7 @@
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMainWindow>
 #include <QProgressBar>
 #include <QPushButton>
@@ -54,6 +56,19 @@ class Window : public QMainWindow {
     QLabel *occluderLabel_;
     QPushButton *removeOccluder_;
     QPushButton *bake_, *cancel_, *export_, *exportTexture_;
+    QSpinBox *uvSpacing_;
+    QLineEdit *uv2Name_;
+    QCheckBox *uvRotate_;
+    QPushButton *generateUv2_, *generateUv2As_;
+    QLabel *uv2Target_;
+    QString uv2Source_, uv2Output_;
+    QTabWidget *previewTabs_;
+    QWidget *uvLayoutTab_;
+    QGraphicsView *uvView_;
+    QGraphicsScene *uvScene_;
+    QLabel *uvLayoutLabel_;
+    std::weak_ptr<Scene> uvLayoutScene_;
+    int uvLayoutSet_ = -1;
     QProgressBar *progress_;
     QElapsedTimer timer_;
     std::thread worker_;
@@ -74,4 +89,8 @@ class Window : public QMainWindow {
     void showError(const QString &);
     void updatePreview();
     void finish(std::shared_ptr<Result>, const QString &);
+    QString uv2Target() const;
+    void generateUv2(bool chooseFile = false);
+    void finishUv2(const Uv2Report &, const QString &output, const QString &error);
+    void updateUvLayout();
 };

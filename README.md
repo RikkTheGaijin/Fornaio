@@ -45,6 +45,16 @@ Preview with the synchronized 3D split view (source | target) or the 2D before/a
 
 Source taps are clamped to the UV tile of each sample: a 0–1 texture never bleeds across its opposite border, while UVs outside 0–1 still repeat.
 
+## UV2 layout
+
+**Generate UV2…** (AO Baker tab, section 02) takes the loaded FBX, keeps UV1 untouched and writes a copy with a new UV2: every UV1 island packed into the 0–1 tile at one shared texel density, without overlaps. Mirrored and stacked UV1 islands each get their own space, so the result bakes with unique AO. The copy is loaded with AO baking set to UV2; the **UV layout** preview tab shows it. An existing second UV set is replaced.
+
+- **UV set name** (default `UV2`) names the generated set: letters, digits and underscores, different from the UV1 name. Leave it empty to keep the name of a replaced second UV set.
+- **Island spacing** is the minimum gap between islands in pixels at the selected bake resolution. Keep it at least twice the mip levels you need to protect.
+- **Allow 90° island rotation** is off by default. When on, the packer also tries turning islands and keeps rotation only when it fits more texel area into the tile.
+- The packer runs a parallel search over several skyline strategies (best-fit, height/width/area orders) and keeps the densest layout. Tall hair-card strips are stacked in columns, similar to RizomUV packing.
+- Only binary FBX 7.x is supported; the output keeps every other FBX node byte-for-byte. ASCII FBX and OBJ are rejected.
+
 ## Controls and interpretation
 
 - Left drag orbits; right/middle drag pans; wheel zooms; **Frame model** resets the camera. Red geometry marks invalid output UV faces. The image viewer supports wheel zoom, drag pan, fit, and 1:1 inspection.
@@ -63,7 +73,7 @@ Source taps are clamped to the UV tile of each sample: a 0–1 texture never ble
 
 ## Boundaries
 
-One hair geometry file (which may contain multiple meshes), one optional opaque occluder file, one shared hair mask, one output atlas, front-side AO. UV selections refer to layer ordinals across the hair meshes; the chosen sets must exist on every hair mesh. Occluder UVs are ignored. Static imported transforms and normals are preserved; animation, skin deformation, material shader networks, automatic unwrapping, UDIMs, and mesh export are not included. The CPU implementation is a small validation reference, not a production fallback.
+One hair geometry file (which may contain multiple meshes), one optional opaque occluder file, one shared hair mask, one output atlas, front-side AO. UV selections refer to layer ordinals across the hair meshes; the chosen sets must exist on every hair mesh. Occluder UVs are ignored. Static imported transforms and normals are preserved; animation, skin deformation, material shader networks, automatic unwrapping, UDIMs, and general mesh export are not included (the UV2 packer only rewrites UV layers of binary FBX files). The CPU implementation is a small validation reference, not a production fallback.
 
 Mask-aware AO is a sampled estimate. Raise the ray count to reduce noise and supersampling to resolve subpixel strands. Features substantially smaller than an output texel need a higher resolution. Test coverage and practical limits are documented in `VALIDATION.md`.
 
@@ -98,6 +108,7 @@ The integration script uses only Python's standard library. Regenerating FBX fix
 .\fornaio_cli.exe --inspect samples/stacked_cards.fbx
 .\fornaio_cli.exe --mesh samples/single_card.obj --occluder samples/occluder_no_uv.obj --mask samples/half.png --size 512 --out hair_with_occluder.png
 .\fornaio_cli.exe --help
+.\fornaio_cli.exe --generate-uv2 hair.fbx --uv2-out hair_UV2.fbx --size 2048 --uv-spacing 4 [--uv-rotate] [--uv2-name hairAO]
 ```
 
 ```powershell
@@ -122,4 +133,19 @@ Mirrored UV islands are supported. Overlap warnings identify the first offending
 
 ## Implementation
 
-`core` handles scene import, mask decoding, exact-area UV overlap checks, UV-island connectivity, spatial binning, PNG export, and CPU reference tracing. `gpu` owns OptiX/CUDA resources through RAII; the device kernel rasterizes AO UV subpixels and casts cosine-weighted rays. GPU work is dispatched in bounded pixel/ray batches with cancellation checks between launches. `window` and `viewport` provide the asynchronous UI and OpenGL preview. `transfer`, `transfer_gpu` and `transfer_kernel.cu` implement texture reprojection on the CPU and on OptiX. They share their sampling code through `transfer_shared.h`. `transfer_panel` and `transfer_viewport` provide the Texture Transfer tab. Dependency details and licenses are in `THIRD_PARTY_NOTICES.md` and `licenses/`.
+`core` handles scene import, mask decoding, exact-area UV overlap checks, UV-island connectivity, spatial binning, PNG export, and CPU reference tracing. `gpu` owns OptiX/CUDA resources through RAII; the device kernel rasterizes AO UV subpixels and casts cosine-weighted rays. GPU work is dispatched in bounded pixel/ray batches with cancellation checks between launches. `window` and `viewport` provide the asynchronous UI and OpenGL preview. `transfer`, `transfer_gpu` and `transfer_kernel.cu` implement texture reprojection on the CPU and on OptiX. They share their sampling code through `transfer_shared.h`. `transfer_panel` and `transfer_viewport` provide the Texture Transfer tab. `fbx_binary`, `uv_pack` and `uv2` implement lossless binary FBX rewriting, skyline island packing and UV2 generation. Dependency details and licenses are in `THIRD_PARTY_NOTICES.md` and `licenses/`.
+
+## Release notes
+
+### 1.1.0
+
+- New **UV2 layout** generation in the AO Baker tab: packs the UV1 islands of a binary FBX into a non-overlapping UV2 with uniform texel density, writes an FBX copy and loads it ready for baking.
+- Optional 90° island rotation (off by default), adjustable island spacing and a custom UV set name.
+- After the first save, **Generate UV2** rewrites the same file, so settings can be iterated without a save dialog; **Save as…** picks a new file.
+- New **UV layout** preview tab showing the AO UV set.
+- CLI: `--generate-uv2`, `--uv2-out`, `--uv-spacing`, `--uv-rotate`, `--uv2-name`, `--version`.
+- The version number is shown in the window title.
+
+### 1.0.0
+
+- Initial release: opacity-aware hair-card AO baking on OptiX and Texture Transfer tab.

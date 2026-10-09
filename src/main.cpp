@@ -14,6 +14,7 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     app.setOrganizationName("Fornaio");
     app.setApplicationName("Fornaio");
+    app.setApplicationVersion(FORNAIO_VERSION);
     app.setWindowIcon(QIcon(":/fornaio.png"));
     {
         // One-time carry-over of preferences saved before the rename.

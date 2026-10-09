@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QCryptographicHash>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -11,6 +12,8 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QMessageBox>
+#include <QPainter>
+#include <QRegularExpressionValidator>
 #include <QScrollArea>
 #include <QSettings>
 #include <QSplitter>
@@ -40,7 +43,7 @@ static QLabel *section(const QString &title) {
     return l;
 }
 Window::Window() {
-    setWindowTitle("Fornaio");
+    setWindowTitle("Fornaio " FORNAIO_VERSION);
     resize(1320, 900);
     setMinimumSize(1000, 720);
     auto root = new QWidget;
@@ -136,7 +139,47 @@ Window::Window() {
     averageOverlaps_->setToolTip("Continue baking with unchanged UVs. Faces sharing a pixel contribute "
                                  "opacity-weighted AO. Disable to require unique UVs.");
     controls->addWidget(averageOverlaps_);
-    controls->addWidget(section("02   BAKE SETTINGS"));
+    controls->addWidget(section("02   UV2 LAYOUT"));
+    auto uvNote = new QLabel("Packs the UV1 islands of the loaded FBX into a new non-overlapping UV2 with "
+                             "uniform texel density, then loads the result.");
+    uvNote->setWordWrap(true);
+    uvNote->setStyleSheet("color:#97a9be;");
+    controls->addWidget(uvNote);
+    auto uvForm = new QFormLayout;
+    uvSpacing_ = new ScrollSpinBox;
+    uvSpacing_->setRange(1, 64);
+    uvSpacing_->setValue(4);
+    uvSpacing_->setSuffix(" px");
+    uvSpacing_->setToolTip("Minimum gap between UV2 islands, in pixels at the selected bake resolution.");
+    uvForm->addRow("Island spacing", uvSpacing_);
+    uv2Name_ = new QLineEdit("UV2");
+    uv2Name_->setPlaceholderText("UV2");
+    uv2Name_->setMaxLength(64);
+    uv2Name_->setValidator(
+        new QRegularExpressionValidator(QRegularExpression("[A-Za-z_][A-Za-z0-9_]*"), uv2Name_));
+    uv2Name_->setToolTip("Name of the generated UV set. Letters, digits and underscores; it must differ from "
+                         "the UV1 name.");
+    uvForm->addRow("UV set name", uv2Name_);
+    controls->addLayout(uvForm);
+    uvRotate_ = new QCheckBox("Allow 90° island rotation");
+    uvRotate_->setToolTip("Lets the packer turn islands by 90° when that fits them tighter. Off keeps every "
+                          "island in its UV1 orientation.");
+    controls->addWidget(uvRotate_);
+    generateUv2_ = new QPushButton("Generate UV2");
+    generateUv2_->setEnabled(false);
+    generateUv2As_ = new QPushButton("Save as…");
+    generateUv2As_->setEnabled(false);
+    generateUv2As_->setToolTip("Generate UV2 into a different FBX file.");
+    auto uvButtons = new QHBoxLayout;
+    uvButtons->addWidget(generateUv2_, 1);
+    uvButtons->addWidget(generateUv2As_);
+    controls->addLayout(uvButtons);
+    uv2Target_ = new QLabel;
+    uv2Target_->setWordWrap(true);
+    uv2Target_->setStyleSheet("color:#97a9be;");
+    uv2Target_->hide();
+    controls->addWidget(uv2Target_);
+    controls->addWidget(section("03   BAKE SETTINGS"));
     auto presets = new QHBoxLayout;
     auto draft = new QPushButton("Draft"), quality = new QPushButton("Quality");
     presets->addWidget(draft);
@@ -222,6 +265,26 @@ Window::Window() {
     imageView_->setBackgroundBrush(QColor("#11151b"));
     rl->addWidget(imageView_);
     tabs->addTab(resultTab, "AO texture");
+    uvLayoutTab_ = new QWidget;
+    auto ul = new QVBoxLayout(uvLayoutTab_);
+    auto uvTools = new QHBoxLayout;
+    uvLayoutLabel_ = new QLabel("Load geometry to see its AO UV layout.");
+    uvLayoutLabel_->setStyleSheet("color:#97a9be;");
+    uvTools->addWidget(uvLayoutLabel_, 1);
+    auto fitUv = new QPushButton("Fit");
+    uvTools->addWidget(fitUv);
+    ul->addLayout(uvTools);
+    uvScene_ = new QGraphicsScene(this);
+    uvView_ = new ImageView(uvScene_);
+    uvView_->setDragMode(QGraphicsView::ScrollHandDrag);
+    uvView_->setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+    uvView_->setBackgroundBrush(QColor("#11151b"));
+    ul->addWidget(uvView_);
+    tabs->addTab(uvLayoutTab_, "UV layout");
+    previewTabs_ = tabs;
+    connect(fitUv, &QPushButton::clicked, this,
+            [this] { uvView_->fitInView(uvScene_->sceneRect(), Qt::KeepAspectRatio); });
+    connect(tabs, &QTabWidget::currentChanged, this, [this] { updateUvLayout(); });
     pv->addWidget(tabs);
     split->addWidget(preview);
     split->setStretchFactor(1, 1);
@@ -272,10 +335,15 @@ Window::Window() {
     });
     connect(removeOccluder_, &QPushButton::clicked, this, [this] { loadOccluder({}); });
     connect(bake_, &QPushButton::clicked, this, &Window::bake);
+    connect(generateUv2_, &QPushButton::clicked, this, [this] { generateUv2(); });
+    connect(generateUv2As_, &QPushButton::clicked, this, [this] { generateUv2(true); });
+    connect(uvRotate_, &QCheckBox::toggled, this, [this] { saveSettings(); });
+    connect(uv2Name_, &QLineEdit::editingFinished, this, [this] { saveSettings(); });
+    connect(uvSpacing_, &QSpinBox::valueChanged, this, [this] { saveSettings(); });
     connect(cancel_, &QPushButton::clicked, this, [this] {
         cancelFlag_ = true;
         cancel_->setEnabled(false);
-        status_->setText("Cancelling after the current GPU batch…");
+        status_->setText("Cancelling…");
     });
     connect(export_, &QPushButton::clicked, this, &Window::exportPng);
     connect(exportTexture_, &QPushButton::clicked, this, &Window::exportPng);
@@ -478,7 +546,19 @@ void Window::refresh() {
     }
     bake_->setEnabled(valid && !originalMask_.isNull() && !transferRunning_);
     bake_->setToolTip(transferRunning_ ? "Waiting for the texture transfer to finish." : QString());
+    const bool fbx = scene_ && meshPath_.endsWith(".fbx", Qt::CaseInsensitive);
+    const QString target = fbx ? uv2Target() : QString();
+    generateUv2_->setEnabled(fbx);
+    generateUv2As_->setEnabled(fbx);
+    generateUv2_->setText(target.isEmpty() ? "Generate UV2…" : "Generate UV2");
+    generateUv2_->setToolTip(!fbx ? "Load an FBX whose UV1 holds the hair-card UVs."
+                             : target.isEmpty() ? "Save a copy of the FBX with a packed UV2 and load it."
+                                                : "Regenerate UV2 into " + QDir::toNativeSeparators(target));
+    uv2Target_->setText("Writes to " + QFileInfo(target).fileName());
+    uv2Target_->setToolTip(QDir::toNativeSeparators(target));
+    uv2Target_->setVisible(!target.isEmpty());
     updatePreview();
+    updateUvLayout();
     saveSettings();
 }
 void Window::bake() {
@@ -571,6 +651,155 @@ void Window::finish(std::shared_ptr<Result> r, const QString &error) {
         });
     }
 }
+// QFileInfo::operator== treats any two missing files as equal, so compare absolute paths instead.
+static bool samePath(const QString &a, const QString &b) {
+    return !a.isEmpty() && !b.isEmpty() &&
+           QDir::cleanPath(QFileInfo(a).absoluteFilePath())
+                   .compare(QDir::cleanPath(QFileInfo(b).absoluteFilePath()), Qt::CaseInsensitive) == 0;
+}
+QString Window::uv2Target() const {
+    // The remembered target applies while either end of the last generation is loaded.
+    return samePath(meshPath_, uv2Output_) || samePath(meshPath_, uv2Source_) ? uv2Output_ : QString();
+}
+void Window::generateUv2(bool chooseFile) {
+    if (!scene_ || busy_ || transferRunning_ || !meshPath_.endsWith(".fbx", Qt::CaseInsensitive))
+        return;
+    QString output = chooseFile ? QString() : uv2Target();
+    // Repack from the original file rather than a previously generated copy when it still exists.
+    const bool generated = samePath(meshPath_, uv2Output_);
+    const QString input = generated && QFileInfo::exists(uv2Source_) ? uv2Source_ : meshPath_;
+    if (output.isEmpty()) {
+        const QFileInfo source(input);
+        const QString suggested = uv2Target().isEmpty()
+                                      ? source.absolutePath() + "/" + source.completeBaseName() + "_UV2.fbx"
+                                      : uv2Target();
+        output = QFileDialog::getSaveFileName(this, "Save FBX with generated UV2", suggested, "FBX (*.fbx)");
+        // The save dialog runs a nested event loop; re-check that nothing started meanwhile.
+        if (output.isEmpty() || busy_ || transferRunning_)
+            return;
+        if (!output.endsWith(".fbx", Qt::CaseInsensitive))
+            output += ".fbx";
+    }
+    PackSettings pack;
+    pack.resolution = resolution_->currentData().toInt();
+    pack.spacing = uvSpacing_->value();
+    pack.allowRotation = uvRotate_->isChecked();
+    const QString name = uv2Name_->text().trimmed();
+    if (QString error = name.isEmpty() ? QString() : uvSetNameError(name); !error.isEmpty()) {
+        showError(error);
+        return;
+    }
+    if (worker_.joinable())
+        worker_.join();
+    saveSettings();
+    progress_->setValue(0);
+    busy_ = true;
+    transfer_->setExternalBusy(true);
+    cancelFlag_ = false;
+    inputs_->setEnabled(false);
+    bake_->setEnabled(false);
+    cancel_->setEnabled(true);
+    status_->setText("Generating UV2…");
+    timer_.start();
+    worker_ = std::thread([this, input, output, pack, name] {
+        try {
+            auto report = ::generateUv2(input, output, pack, name, cancelFlag_, [this](float p, const QString &text) {
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, p, text] {
+                        progress_->setValue((int)(p * 1000));
+                        status_->setText(text);
+                    },
+                    Qt::QueuedConnection);
+            });
+            QMetaObject::invokeMethod(
+                this,
+                [this, report, input, output] {
+                    uv2Source_ = input;
+                    uv2Output_ = output;
+                    finishUv2(report, output, {});
+                },
+                Qt::QueuedConnection);
+        } catch (const std::exception &e) {
+            QString error = QString::fromUtf8(e.what());
+            QMetaObject::invokeMethod(this, [this, output, error] { finishUv2({}, output, error); },
+                                      Qt::QueuedConnection);
+        }
+    });
+}
+void Window::finishUv2(const Uv2Report &report, const QString &output, const QString &error) {
+    if (worker_.joinable())
+        worker_.join();
+    busy_ = false;
+    transfer_->setExternalBusy(false);
+    inputs_->setEnabled(true);
+    cancel_->setEnabled(false);
+    elapsed_->clear();
+    if (!error.isEmpty()) {
+        progress_->setValue(0);
+        status_->setText(error + (result_ ? " Last completed bake is still available to export." : ""));
+        bake_->setEnabled(validationCache_.ok() && scene_ && !originalMask_.isNull() && !transferRunning_);
+        if (!cancelFlag_)
+            showError(error);
+        return;
+    }
+    progress_->setValue(1000);
+    if (!loadInputs(output, {}))
+        return;
+    // The packer writes UV2 as the second UV set; bake AO into it, keep the mask on UV1.
+    if (scene_->uvNames.size() > 1) {
+        maskUV_->setCurrentIndex(0);
+        aoUV_->setCurrentIndex(1);
+    }
+    previewTabs_->setCurrentWidget(uvLayoutTab_);
+    status_->setText(QString("UV2 generated · %1 islands in %2 meshes · %3% of the tile used%4 · %5 s · saved %6")
+                         .arg(report.islands)
+                         .arg(report.meshes)
+                         .arg(report.utilization * 100, 0, 'f', 1)
+                         .arg(report.rotated ? QString(" · %1 rotated").arg(report.rotated) : QString())
+                         .arg(report.seconds, 0, 'f', 2)
+                         .arg(QDir::toNativeSeparators(output)));
+    if (!report.warnings.empty())
+        QMessageBox::information(this, "Fornaio", "UV2 generated with notes:\n\n" + report.warnings.join('\n'));
+}
+void Window::updateUvLayout() {
+    if (previewTabs_->currentWidget() != uvLayoutTab_)
+        return;
+    const int set = aoUV_->currentIndex();
+    if (!uvLayoutScene_.expired() && uvLayoutScene_.lock() == scene_ && uvLayoutSet_ == set)
+        return;
+    uvLayoutScene_ = scene_;
+    uvLayoutSet_ = set;
+    uvScene_->clear();
+    if (!scene_ || set < 0 || set >= scene_->uvNames.size()) {
+        uvLayoutLabel_->setText("Load geometry to see its AO UV layout.");
+        return;
+    }
+    constexpr int size = 2048;
+    QImage image(size, size, QImage::Format_RGB32);
+    image.fill(QColor("#11151b"));
+    {
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(QColor(75, 196, 175, 90), 0));
+        painter.setBrush(QColor("#6f7c8a"));
+        for (const auto &t : scene_->tris) {
+            if (set >= (int)t.uv.size())
+                continue;
+            QPointF p[3];
+            for (int k = 0; k < 3; ++k)
+                p[k] = {t.uv[set][k].x * size, (1 - t.uv[set][k].y) * size};
+            painter.drawPolygon(p, 3);
+        }
+        painter.setPen(QPen(QColor("#4bc4af"), 2));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(QRectF(1, 1, size - 2, size - 2));
+    }
+    uvScene_->addPixmap(QPixmap::fromImage(image));
+    uvScene_->setSceneRect(image.rect());
+    uvView_->fitInView(image.rect(), Qt::KeepAspectRatio);
+    uvLayoutLabel_->setText(QString("%1 · 0–1 tile · scroll to zoom").arg(scene_->uvNames[set]));
+}
 void Window::exportPng() {
     // Native dialogs run a nested event loop. Hold the selected result independently
     // so a later bake completion can never replace it halfway through exporting.
@@ -609,6 +838,9 @@ void Window::saveSettings() {
     q.setValue("flip", s.flip);
     q.setValue("repeat", s.repeat);
     q.setValue("averageOverlaps", s.averageOverlaps);
+    q.setValue("uv2/spacing", uvSpacing_->value());
+    q.setValue("uv2/rotate", uvRotate_->isChecked());
+    q.setValue("uv2/name", uv2Name_->text());
     if (!meshPath_.isEmpty() && s.maskUV >= 0 && s.aoUV >= 0) {
         auto key = filePreferenceKey(meshPath_);
         q.setValue(key + "/maskUV", s.maskUV);
@@ -631,6 +863,10 @@ void Window::restoreSettings() {
     flip_->setChecked(q.value("flip", false).toBool());
     repeat_->setChecked(q.value("repeat", false).toBool());
     averageOverlaps_->setChecked(q.value("averageOverlaps", true).toBool());
+    uvSpacing_->setValue(q.value("uv2/spacing", 4).toInt());
+    uvRotate_->setChecked(q.value("uv2/rotate", false).toBool());
+    if (const QString name = q.value("uv2/name", "UV2").toString(); uvSetNameError(name).isEmpty())
+        uv2Name_->setText(name);
     loading_ = false;
 }
 void Window::closeEvent(QCloseEvent *e) {

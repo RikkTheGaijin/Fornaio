@@ -53,8 +53,8 @@ class UiTests : public QObject {
         w.inputs_->setMinimumHeight(1800);
         QTest::qWait(50);
         QVERIFY(scroll->verticalScrollBar()->maximum() > 0);
-        QList<QWidget *> controls{w.maskUV_, w.aoUV_, w.channel_, w.resolution_, w.ss_,
-                                  w.bits_,   w.rays_, w.padding_, w.distance_,   w.bias_};
+        QList<QWidget *> controls{w.maskUV_, w.aoUV_,  w.channel_,  w.resolution_, w.ss_,       w.bits_,
+                                  w.rays_,   w.padding_, w.distance_, w.bias_,      w.uvSpacing_};
         for (auto control : controls) {
             scroll->ensureWidgetVisible(control);
             control->setFocus();
@@ -186,6 +186,62 @@ class UiTests : public QObject {
         w.mode_->setCurrentIndex(2);
         QCOMPARE(w.view_->scene_->occluder.get(), bakedHead.get());
         QVERIFY(w.export_->isEnabled());
+    }
+    void uv2LayoutControlsAndPreview() {
+        Window w;
+        QVERIFY(!w.uvRotate_->isChecked());
+        QCOMPARE(w.uvSpacing_->value(), 4);
+        QCOMPARE(w.uv2Name_->text(), QString("UV2"));
+        int pos = 0;
+        QString bad = "2 uv";
+        QVERIFY(w.uv2Name_->validator()->validate(bad, pos) == QValidator::Invalid);
+        QVERIFY(!w.generateUv2_->isEnabled());
+        setup(w);
+        QVERIFY(w.generateUv2_->isEnabled());
+        // After one save, regenerating writes to the same file while either end of it is loaded.
+        QVERIFY(w.uv2Target().isEmpty());
+        QVERIFY(w.uv2Target_->isHidden());
+        w.uv2Source_ = "fixture.fbx";
+        w.uv2Output_ = "fixture_UV2.fbx";
+        w.refresh();
+        QCOMPARE(w.uv2Target(), QString("fixture_UV2.fbx"));
+        QVERIFY(!w.uv2Target_->isHidden());
+        QCOMPARE(w.generateUv2_->text(), QString("Generate UV2"));
+        w.meshPath_ = "fixture_UV2.fbx";
+        QCOMPARE(w.uv2Target(), QString("fixture_UV2.fbx"));
+        w.meshPath_ = "other.fbx";
+        w.refresh();
+        QVERIFY(w.uv2Target().isEmpty());
+        QVERIFY(w.uv2Target_->isHidden());
+        w.meshPath_ = "fixture.fbx";
+        w.refresh();
+        // The layout image is rendered only once its tab is shown, then follows the AO UV choice.
+        QCOMPARE(w.uvScene_->items().size(), 0);
+        w.previewTabs_->setCurrentWidget(w.uvLayoutTab_);
+        QCOMPARE(w.uvScene_->items().size(), 1);
+        QVERIFY(w.uvLayoutLabel_->text().startsWith(w.scene_->uvNames[1]));
+        w.aoUV_->setCurrentIndex(0);
+        QVERIFY(w.uvLayoutLabel_->text().startsWith(w.scene_->uvNames[0]));
+        w.uvRotate_->setChecked(true);
+        w.uvSpacing_->setValue(9);
+        w.uv2Name_->setText("hairAO");
+        w.saveSettings();
+        QCOMPARE(QSettings().value("uv2/rotate").toBool(), true);
+        QCOMPARE(QSettings().value("uv2/spacing").toInt(), 9);
+        // A failed or cancelled generation unlocks the inputs and keeps the last bake.
+        const auto original = w.result_;
+        w.busy_ = true;
+        w.inputs_->setEnabled(false);
+        w.cancelFlag_ = true;
+        w.finishUv2({}, "out.fbx", "UV2 generation cancelled.");
+        QVERIFY(!w.busy_);
+        QVERIFY(w.inputs_->isEnabled());
+        QCOMPARE(w.result_.get(), original.get());
+        QVERIFY(w.status_->text().startsWith("UV2 generation cancelled."));
+        Window restored;
+        QVERIFY(restored.uvRotate_->isChecked());
+        QCOMPARE(restored.uvSpacing_->value(), 9);
+        QCOMPARE(restored.uv2Name_->text(), QString("hairAO"));
     }
     void transferTabBuildsJobAndExcludesConcurrentGpuJobs() {
         Window w;

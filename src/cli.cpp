@@ -1,5 +1,6 @@
 #include "core.h"
 #include "transfer.h"
+#include "uv2.h"
 #include <QCommandLineParser>
 #include <QDir>
 #include <QFile>
@@ -16,6 +17,7 @@ static void require(bool b, const char *msg) {
         throw std::runtime_error(msg);
 }
 void transferTests(const QString &artifacts, QJsonObject &out);
+void uv2Tests(const QString &artifacts, QJsonObject &out);
 static Mask constantMask(float v) {
     Mask m;
     m.w = m.h = 2;
@@ -298,6 +300,7 @@ static void tests(const QString &dir) {
          "UV validation, transmission, masks, flip/repeat, independent UVs, front-side normals, grazing "
          "normals, distance, self-intersections, cancellation, padding, lossless 16-bit PNG, texture transfer"}};
     transferTests(dir, report);
+    uv2Tests(dir, report);
     QFile f(dir + "/tests.json");
     f.open(QIODevice::WriteOnly);
     f.write(QJsonDocument(report).toJson());
@@ -306,9 +309,11 @@ static void tests(const QString &dir) {
 int main(int argc, char **argv) {
     QGuiApplication app(argc, argv);
     QCoreApplication::setApplicationName("Fornaio CLI");
+    QCoreApplication::setApplicationVersion(FORNAIO_VERSION);
     QCommandLineParser p;
     p.setApplicationDescription("Opacity-aware AO baker; UV numbers are one-based.");
     p.addHelpOption();
+    p.addVersionOption();
     for (auto opt : std::vector<QCommandLineOption>{
              {"self-test", "Run CPU/GPU correctness tests."},
              {"benchmark", "Bake a generated dense 400-card fixture."},
@@ -334,6 +339,11 @@ int main(int argc, char **argv) {
              {"reference", "Use slow CPU reference for small validation fixtures."},
              {"transfer", "Run a texture transfer job (JSON saved from the Texture Transfer tab).", "job"},
              {"overwrite", "Allow a transfer job to replace existing output files."},
+             {"generate-uv2", "Pack the UV1 islands of a binary FBX into a new UV2 set (uses --size).", "file"},
+             {"uv2-out", "Output FBX for --generate-uv2.", "file"},
+             {"uv-spacing", "UV2 island spacing in pixels at --size.", "pixels", "4"},
+             {"uv-rotate", "Allow 90 degree island rotation when packing UV2."},
+             {"uv2-name", "Name of the generated UV set (default: keep the replaced set's name, else UV2).", "name"},
              {"artifacts", "Test results directory.", "directory", "artifacts"}})
         p.addOption(opt);
     p.process(app);
@@ -376,6 +386,32 @@ int main(int argc, char **argv) {
                             {"exact_triangles", report.exactTriangles},
                             {"covered_texels", report.coveredTexels},
                             {"missed_texels", report.missedTexels},
+                            {"warnings", QJsonArray::fromStringList(report.warnings)}};
+            std::cout << QJsonDocument(obj).toJson().constData();
+            return 0;
+        }
+        if (p.isSet("generate-uv2")) {
+            if (!p.isSet("uv2-out"))
+                throw std::runtime_error("--generate-uv2 requires --uv2-out.");
+            bool sizeOk, spacingOk;
+            PackSettings settings;
+            settings.resolution = p.value("size").toInt(&sizeOk);
+            settings.spacing = p.value("uv-spacing").toInt(&spacingOk);
+            settings.allowRotation = p.isSet("uv-rotate");
+            if (!sizeOk || !spacingOk)
+                throw std::runtime_error("Invalid --size or --uv-spacing.");
+            std::atomic_bool cancel{false};
+            auto report =
+                generateUv2(p.value("generate-uv2"), p.value("uv2-out"), settings, p.value("uv2-name"), cancel);
+            for (const auto &w : report.warnings)
+                std::cerr << "WARNING: " << w.toStdString() << '\n';
+            QJsonObject obj{{"output", p.value("uv2-out")},
+                            {"meshes", report.meshes},
+                            {"islands", report.islands},
+                            {"rotated_islands", report.rotated},
+                            {"replaced_uv_sets", report.replaced},
+                            {"utilization", report.utilization},
+                            {"seconds", report.seconds},
                             {"warnings", QJsonArray::fromStringList(report.warnings)}};
             std::cout << QJsonDocument(obj).toJson().constData();
             return 0;

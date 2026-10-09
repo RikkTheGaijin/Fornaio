@@ -128,6 +128,19 @@ assert max(abs(a-b) for a,b in zip(gv,cv))<=2,'Opaque occluder GPU/CPU mismatch'
 assert min(gv)<6553,'Opaque occluder did not darken the hair'
 print('PASS: UV-less occluder import, opaque casting, and GPU/CPU parity.')
 
+# UV2 generation: the existing (overlapping) UV2 of the stacked cards is replaced by a packed, strictly
+# non-overlapping layout that bakes, with and without island rotation.
+for rotate in [[], ['--uv-rotate']]:
+    uv2 = OUT / f'stacked_cards_UV2{"_rot" if rotate else ""}.fbx'
+    report = json.loads(run('--generate-uv2', 'samples/stacked_cards.fbx', '--uv2-out', uv2, '--size', 256, *rotate).stdout)
+    assert report['replaced_uv_sets'] == 1 and report['islands'] > 0 and 0 < report['utilization'] <= 1, report
+    packed = json.loads(run('--inspect', uv2).stdout)
+    assert len(packed['uv_sets']) == 2 and packed['triangles'] == fbx['triangles']
+    run('--mesh', uv2, '--mask', 'samples/strands.png', '--ao-uv', 2, '--strict-uv', '--size', 32, '--rays', 4, '--out', OUT / (uv2.stem + '.png'))
+failure = run('--generate-uv2', 'samples/single_card.obj', '--uv2-out', OUT / 'nope.fbx', ok=False)
+assert 'FBX' in failure.stderr, failure.stderr
+print('PASS: UV2 generation replaces overlapping UV2 with a strict, bakeable packed layout; non-FBX input rejected.')
+
 # Texture transfer: identical 8x8 grids; the target UVs are mirrored horizontally, so every target texel
 # centre maps exactly onto a source texel centre and the transfer must be lossless.
 XFER = OUT / 'transfer'
