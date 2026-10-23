@@ -5,3 +5,4 @@ dist/
 artifacts/
 aqtinstall.log
 third_party/*/.git/
+graphify-out/
