@@ -1,0 +1,581 @@
+{
+  "format": "FornaioAI",
+  "version": 1,
+  "model": "briaai/Fibo-2.0-edit-turbo",
+  "revision": "b8dd54e5974919b01b252e0833757155d9a8b01b",
+  "python": "runtime/python.exe",
+  "minDriver": 590,
+  "minimumVramMiB": 12000,
+  "versions": {
+    "torch": "2.9.1+cu128",
+    "diffusers": "0.42.0",
+    "transformers": "5.20.2",
+    "accelerate": "1.15.0",
+    "pillow": "12.2.0",
+    "fsspec": "2026.9.0",
+    "huggingface_hub": "2.3.0",
+    "filelock": "4.2.4",
+    "networkx": "3.7",
+    "numpy": "2.5.4",
+    "packaging": "26.3",
+    "PyYAML": "6.0.3",
+    "regex": "2026.9.29",
+    "safetensors": "0.8.0",
+    "sympy": "1.14.0",
+    "tokenizers": "0.23.3",
+    "tqdm": "4.70.1",
+    "typing_extensions": "4.16.0",
+    "importlib_metadata": "10.1.0",
+    "Jinja2": "3.1.6",
+    "psutil": "7.2.2",
+    "requests": "2.34.2",
+    "setuptools": "84.2.1",
+    "typer": "0.27.3",
+    "annotated-doc": "0.0.5",
+    "certifi": "2026.10.23",
+    "charset-normalizer": "3.5.2",
+    "click": "8.5.0",
+    "hf-xet": "1.7.0",
+    "httpx2": "2.16.0",
+    "httpcore2": "2.16.0",
+    "idna": "3.20",
+    "MarkupSafe": "3.0.4",
+    "mpmath": "1.3.0",
+    "rich": "15.0.0",
+    "shellingham": "1.5.4",
+    "urllib3": "2.8.0",
+    "zipp": "4.1.2",
+    "colorama": "0.4.6",
+    "anyio": "4.15.1",
+    "markdown-it-py": "4.2.0",
+    "Pygments": "2.21.0",
+    "truststore": "0.10.5",
+    "h11": "0.16.0",
+    "mdurl": "0.1.2"
+  },
+  "files": [
+    {
+      "path": "runtime/python.zip",
+      "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+      "bytes": 11133606,
+      "sha256": "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3",
+      "extract": "runtime",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/torch-2.9.1%2Bcu128-cp312-cp312-win_amd64.whl",
+      "url": "https://download-r2.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-win_amd64.whl",
+      "bytes": 2862033275,
+      "sha256": "3a01f0b64c10a82d444d9fd06b3e8c567b1158b76b2764b8f51bfd8f535064b0",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/diffusers-0.42.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/ac/ac/08dca462b503e8c16099af647401c2548cbe2c4fbafd487ff3265fa57385/diffusers-0.42.0-py3-none-any.whl",
+      "bytes": 6354874,
+      "sha256": "c409b893156c895dde5b7fe410a014f6b94bf7caa1b96360e43a335c762674f4",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/transformers-5.20.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/96/b6/724faefed06913dd3e42e0476fe2c42448675c42f687a12bf810aa098005/transformers-5.20.2-py3-none-any.whl",
+      "bytes": 12844921,
+      "sha256": "7ae75dbc1fb3922aff1b6c97b9e5479d6cf26fd86a8866bfb71324190479f807",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/accelerate-1.15.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/8a/4c/34f0450479d01195027260da68d8a3880683f1640c3ca5adf64acb3185f1/accelerate-1.15.0-py3-none-any.whl",
+      "bytes": 394295,
+      "sha256": "97eacca0b73e45cb867dbf8c5d5d4dc32219544300e0c8992c7334dc2ef33cec",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/pillow-12.2.0-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/5d/7b/25a221d2c761c6a8ae21bfa3874988ff2583e19cf8a27bf2fee358df7942/pillow-12.2.0-cp312-cp312-win_amd64.whl",
+      "bytes": 7084129,
+      "sha256": "7f84204dee22a783350679a0333981df803dac21a0190d706a50475e361c93f5",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/fsspec-2026.9.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/6c/c0/a98505f18594f1bce828bb159cec0fcf9860562f1a2c85913409fc8f3d9e/fsspec-2026.9.0-py3-none-any.whl",
+      "bytes": 221738,
+      "sha256": "8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/huggingface_hub-2.3.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/c7/89/5f6ef1162d0323f167b6baab04d1b4bd6a946161a8af6d86f622d9d79aa1/huggingface_hub-2.3.0-py3-none-any.whl",
+      "bytes": 855161,
+      "sha256": "5da369600233568a126eb5578754935b2add9446b42d9e2fc0927d56840ac1a5",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/filelock-4.2.4-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/e0/1b/5e74289a1878e666bb4b65fe5805a04cafcac2aa5f519ef1ead67ef91c56/filelock-4.2.4-py3-none-any.whl",
+      "bytes": 162475,
+      "sha256": "301241438c57936ef93f4243a94f2559022268bfcf9b375a9a72eb0f8db8358e",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/networkx-3.7-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/7e/cd/fe58041e9011f307c490e3e17dd48cc516448f7c698a3f2d9d9d65d7e6a8/networkx-3.7-py3-none-any.whl",
+      "bytes": 2142205,
+      "sha256": "e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/numpy-2.5.4-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/12/33/fefe62073dc8acfd0f2b9ed7c003af2f50aa61555e113e6db02b8f79f145/numpy-2.5.4-cp312-cp312-win_amd64.whl",
+      "bytes": 12573091,
+      "sha256": "a7b1b6353e36a7e50de2973a38d705c88ee93adcf120673cee7f45a4a3fa223a",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/packaging-26.3-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+      "bytes": 129956,
+      "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/pyyaml-6.0.3-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/86/bf/899e81e4cce32febab4fb42bb97dcdf66bc135272882d1987881a4b519e9/pyyaml-6.0.3-cp312-cp312-win_amd64.whl",
+      "bytes": 154003,
+      "sha256": "5fcd34e47f6e0b794d17de1b4ff496c00986e1c83f7ab2fb8fcfe9616ff7477b",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/regex-2026.9.29-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/93/19/489bc8db91196381c935752df01ba3f607140daece33b78d88573f028e64/regex-2026.9.29-cp312-cp312-win_amd64.whl",
+      "bytes": 280334,
+      "sha256": "fdd88ed5e20b1bcdd234421e454962c971aa44b653bdb7f1ea9ef683e90fb649",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl",
+      "bytes": 355540,
+      "sha256": "096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/sympy-1.14.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+      "bytes": 6299353,
+      "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/tokenizers-0.23.3-cp310-abi3-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/d1/6c/24f074c9a0efb98e61b20aafe6b2641922d5db24e447d5d6daffd9e17555/tokenizers-0.23.3-cp310-abi3-win_amd64.whl",
+      "bytes": 2872101,
+      "sha256": "1f0823bb00c5fdc98e487354d54dd55a03848d61a1a0bf29a68c77f24f3b26c3",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/tqdm-4.70.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a7/03/921a3d3c75785aca9ebfbfcabfbc3a1be12e2ab5265deb026d55a5a3f83e/tqdm-4.70.1-py3-none-any.whl",
+      "bytes": 80199,
+      "sha256": "c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/typing_extensions-4.16.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+      "bytes": 45571,
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/importlib_metadata-10.1.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/65/b6/495438ad95e0102aff8f6786b5474202f38cd5d4700d03a72b77977dec10/importlib_metadata-10.1.0-py3-none-any.whl",
+      "bytes": 32221,
+      "sha256": "cf45ce66a929c64e994185a809c04840d0501db17e663810d993d0f4829265c7",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/jinja2-3.1.6-py3-none-any.whl",
+      "url": "https://download.pytorch.org/whl/jinja2-3.1.6-py3-none-any.whl",
+      "bytes": 134899,
+      "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/psutil-7.2.2-cp37-abi3-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/b4/90/e2159492b5426be0c1fef7acba807a03511f97c5f86b3caeda6ad92351a7/psutil-7.2.2-cp37-abi3-win_amd64.whl",
+      "bytes": 137737,
+      "sha256": "eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/requests-2.34.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+      "bytes": 73075,
+      "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/setuptools-84.2.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/ef/55/6dc6d6bb953bdfc52519a0059592c52b6e3b8ad51cf8256dffceb55b0610/setuptools-84.2.1-py3-none-any.whl",
+      "bytes": 876263,
+      "sha256": "ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/typer-0.27.3-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/07/ea/2e31b67051e91a133189e9c000c222502ddc6969856416de0d095de4c0b0/typer-0.27.3-py3-none-any.whl",
+      "bytes": 123312,
+      "sha256": "e50022f28b82a86313e54501317a1db64bf8f8d036ff8cfe5ca7e47675454aff",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/annotated_doc-0.0.5-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/3e/30/e900b21425a860e195f32e37657aa1f7c7f2b1bfb26f03ca209b90933c06/annotated_doc-0.0.5-py3-none-any.whl",
+      "bytes": 5302,
+      "sha256": "117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/certifi-2026.10.23-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/32/d1/a3652fe2c19134d0d15922177821d863cbd7e842d53a21bbe7e8e3a1b5ac/certifi-2026.10.23-py3-none-any.whl",
+      "bytes": 135082,
+      "sha256": "e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/charset_normalizer-3.5.2-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/eb/e6/e6e083884cbcfd49c64865af05027fe7011be7b2d9179524f099a1b611f3/charset_normalizer-3.5.2-cp312-cp312-win_amd64.whl",
+      "bytes": 207486,
+      "sha256": "780fbe7cab297b81dad9fb8dc5eb003c0468ffb0d9e5f65068c53a34661a96bc",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/click-8.5.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl",
+      "bytes": 125251,
+      "sha256": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/hf_xet-1.7.0-cp38-abi3-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/4d/59/b35106dfa71b6eef605dc88bd038fe99c7f86fb132a15b60d0bf2f235b2c/hf_xet-1.7.0-cp38-abi3-win_amd64.whl",
+      "bytes": 3822644,
+      "sha256": "2b7bb5727889b0f2436dbaaad8fc4c3e66b8240d992716989e0c086b4278b1bc",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/httpx2-2.16.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/7b/3d/2e4bc4fd1ef9770871669adb348d612a6e4786b303a23f9935b81c48dd60/httpx2-2.16.0-py3-none-any.whl",
+      "bytes": 97880,
+      "sha256": "fd2c5d7909e8d86fe92d53020c310ca0e4e431b838c207c5754b9bbf0308d49a",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/httpcore2-2.16.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/af/c2/ce417c397afa5181f0e3c6ff01a4d01639414e1adef08730d97571297151/httpcore2-2.16.0-py3-none-any.whl",
+      "bytes": 85070,
+      "sha256": "5c4358319f2602d984ad93182c9fee5160f22e9da7babdda870a5e7c4e2dc34f",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/idna-3.20-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/58/a2/bb081bab032533a855d44de1d56f8e8426114ff1ba5d1f07a438a0a654f8/idna-3.20-py3-none-any.whl",
+      "bytes": 69583,
+      "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/markupsafe-3.0.4-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/3f/bf/62495e180b7000aaf30000fff849e933f74264638057176cf46852500adc/markupsafe-3.0.4-cp312-cp312-win_amd64.whl",
+      "bytes": 14303,
+      "sha256": "11935df9bf455ed0c04eb87bcd720f02b1fe5e02128a9430f23aed6f93336fc7",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/mpmath-1.3.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+      "bytes": 536198,
+      "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/rich-15.0.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl",
+      "bytes": 310654,
+      "sha256": "33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/shellingham-1.5.4-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl",
+      "bytes": 9755,
+      "sha256": "7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/urllib3-2.8.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl",
+      "bytes": 135717,
+      "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/zipp-4.1.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/b8/44/7bd2007260da11cccca29ba2d4c345f1287aa663db38ee7cefeabf6386a5/zipp-4.1.2-py3-none-any.whl",
+      "bytes": 10581,
+      "sha256": "b30cb6cd253122169c47de245ca24a86bac2a5d3802ba15bf7ba6414eb9e144d",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/colorama-0.4.6-py2.py3-none-any.whl",
+      "url": "https://download.pytorch.org/whl/colorama-0.4.6-py2.py3-none-any.whl",
+      "bytes": 25335,
+      "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/anyio-4.15.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/12/b8/4bd346e22b28902df4d651910f5242c28d84e4a5c2435ca5c3f797ed7e2e/anyio-4.15.1-py3-none-any.whl",
+      "bytes": 132079,
+      "sha256": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/markdown_it_py-4.2.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/b3/81/4da04ced5a082363ecfa159c010d200ecbd959ae410c10c0264a38cac0f5/markdown_it_py-4.2.0-py3-none-any.whl",
+      "bytes": 91687,
+      "sha256": "9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/pygments-2.21.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl",
+      "bytes": 1250147,
+      "sha256": "2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/truststore-0.10.5-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/51/e9/3a7820be2bb0fe53b6bc9c3be26d3d1158004e4c3ab953aa6840b955b1e9/truststore-0.10.5-py3-none-any.whl",
+      "bytes": 19017,
+      "sha256": "9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/h11-0.16.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl",
+      "bytes": 37515,
+      "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "runtime/mdurl-0.1.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl",
+      "bytes": 9979,
+      "sha256": "84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8",
+      "extract": "runtime/Lib/site-packages",
+      "component": "runtime"
+    },
+    {
+      "path": "model/README.md",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/README.md",
+      "bytes": 14927,
+      "sha256": "e9f522c788212099fa66270ccf68f1353754e9ff9af86dea29c25a002faf24cd",
+      "component": "model"
+    },
+    {
+      "path": "model/fonts/Aileron-Regular.otf",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/fonts/Aileron-Regular.otf",
+      "bytes": 27644,
+      "sha256": "2762f4fc2ebad8323264aea52ffa2260b86c9677493d3ce2dc4f34e5851d2aa2",
+      "component": "model"
+    },
+    {
+      "path": "model/fonts/DejaVuSans.ttf",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/fonts/DejaVuSans.ttf",
+      "bytes": 757076,
+      "sha256": "437a5ecec2ec177cba9284cbffc56055311347f3e9fe4f2b4b40323d0290a6db",
+      "component": "model"
+    },
+    {
+      "path": "model/fonts/LICENSE-Aileron.txt",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/fonts/LICENSE-Aileron.txt",
+      "bytes": 673,
+      "sha256": "d9f3c3a524f8f3d671de2bfb42a924e9ca8aa4afb66fbee04441ad6e7f623fd2",
+      "component": "model"
+    },
+    {
+      "path": "model/fonts/LICENSE-DejaVu.txt",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/fonts/LICENSE-DejaVu.txt",
+      "bytes": 3844,
+      "sha256": "c67177807098edcacec9f10f724eb9f79d93fab5c9ad7422ca7e351a3376de97",
+      "component": "model"
+    },
+    {
+      "path": "model/fonts/README.md",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/fonts/README.md",
+      "bytes": 1059,
+      "sha256": "1787088f27e72b314c9cfc20831fef4cf9a0cbd24630162c1a2a123236112e47",
+      "component": "model"
+    },
+    {
+      "path": "model/model_index.json",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/model_index.json",
+      "bytes": 438,
+      "sha256": "6b126ec03c0509890b290903cc1738b2e3b7cb6a87f89ce3f1e7758db0306d9c",
+      "component": "model"
+    },
+    {
+      "path": "model/processor/chat_template.jinja",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/processor/chat_template.jinja",
+      "bytes": 5292,
+      "sha256": "3636d0f0bd6bef02654cdffdc447b79cb2cef8ab02cc75267345946291a489e4",
+      "component": "model"
+    },
+    {
+      "path": "model/processor/processor_config.json",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/processor/processor_config.json",
+      "bytes": 1218,
+      "sha256": "11924a8c5152ade8b15d25d3e4464fcc961f86cf856d168c4fe1535ea0a29702",
+      "component": "model"
+    },
+    {
+      "path": "model/processor/tokenizer.json",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/processor/tokenizer.json",
+      "bytes": 11422650,
+      "sha256": "be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506",
+      "component": "model"
+    },
+    {
+      "path": "model/processor/tokenizer_config.json",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/processor/tokenizer_config.json",
+      "bytes": 734,
+      "sha256": "7ce86d685d3fb775073b9b1c0f576dd89b7943194c771dd2573cc10e5cae4a48",
+      "component": "model"
+    },
+    {
+      "path": "model/scheduler/scheduler_config.json",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/scheduler/scheduler_config.json",
+      "bytes": 486,
+      "sha256": "1d030c3b5f422e08a49aed14a3a1c78e57f3721a7be1fd9ab2404787af22a32c",
+      "component": "model"
+    },
+    {
+      "path": "model/text_encoder/config.json",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/text_encoder/config.json",
+      "bytes": 1674,
+      "sha256": "9b3743efc786f7c2fe428615549920b6d285c27ff0df3acf2ba2aad8aa953ea8",
+      "component": "model"
+    },
+    {
+      "path": "model/text_encoder/generation_config.json",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/text_encoder/generation_config.json",
+      "bytes": 242,
+      "sha256": "5cd5c00e03e8197b1991aafbb6b4583075c55a46788b7d3262aec98d6a49ba64",
+      "component": "model"
+    },
+    {
+      "path": "model/text_encoder/model.safetensors",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/text_encoder/model.safetensors",
+      "bytes": 8875719408,
+      "sha256": "f0b24fc5c8d7c0ea6ca909da14c20af5cac53f22506be942c6c956f838b9630f",
+      "component": "model"
+    },
+    {
+      "path": "model/transformer/config.json",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/transformer/config.json",
+      "bytes": 623,
+      "sha256": "2fd8dd1787a014c46a5cb23f119c33c219a1111de12263e75279d158c9194c87",
+      "component": "model"
+    },
+    {
+      "path": "model/transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+      "bytes": 9991176550,
+      "sha256": "4a74dac30a279a51382db935515d3048169996cfbc2efbced4c55f244a70274b",
+      "component": "model"
+    },
+    {
+      "path": "model/transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+      "bytes": 6263592868,
+      "sha256": "47b44fac46272718139275f41bdbd56e5d58c0ffcc02076ef3e9853e8d313918",
+      "component": "model"
+    },
+    {
+      "path": "model/transformer/diffusion_pytorch_model.safetensors.index.json",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/transformer/diffusion_pytorch_model.safetensors.index.json",
+      "bytes": 73887,
+      "sha256": "7f0af4cdf2ff0902d3ffc3844e8a9b0427e273fa95b5824c73708639dca33bfa",
+      "component": "model"
+    },
+    {
+      "path": "model/vae/config.json",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/vae/config.json",
+      "bytes": 915,
+      "sha256": "b5f9c47863e68fc4d851c187e7bd8646cb90811e859333a8b133793bbe415f2d",
+      "component": "model"
+    },
+    {
+      "path": "model/vae/diffusion_pytorch_model.safetensors",
+      "url": "https://huggingface.co/briaai/Fibo-2.0-edit-turbo/resolve/b8dd54e5974919b01b252e0833757155d9a8b01b/vae/diffusion_pytorch_model.safetensors",
+      "bytes": 336213556,
+      "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5",
+      "component": "model"
+    },
+    {
+      "path": "runtime/Lib/site-packages/tokenizers/LICENSE",
+      "url": "https://raw.githubusercontent.com/huggingface/tokenizers/v0.23.3/LICENSE",
+      "bytes": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "component": "runtime"
+    }
+  ],
+  "id": "fibo2-c62a3070653416fc"
+}

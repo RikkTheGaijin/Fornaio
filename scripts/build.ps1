@@ -20,4 +20,8 @@ if ($LASTEXITCODE) { throw 'Build failed.' }
 & "$qt\bin\windeployqt.exe" --release --no-translations --no-system-d3d-compiler --no-opengl-sw --no-compiler-runtime build\Release\Fornaio.exe
 if ($LASTEXITCODE) { throw 'Qt deployment failed.' }
 Copy-Item -LiteralPath "$qt\bin\Qt6Test.dll" -Destination build\Release -Force
+# The optional private Python engine also needs the app-local MSVC runtime on clean Windows.
+$redist = Get-ChildItem -LiteralPath (Join-Path $vsRoot 'VC\Redist\MSVC') -Directory | Where-Object Name -Match '^14\.' | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+$crt = Join-Path $redist.FullName 'x64\Microsoft.VC143.CRT'
+Get-ChildItem -LiteralPath $crt -Filter '*.dll' | Copy-Item -Destination build\Release -Force
 if ($Package) { & "$PSScriptRoot\package.ps1" }

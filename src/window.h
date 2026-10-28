@@ -2,6 +2,7 @@
 #include "viewport.h"
 #include "transfer_panel.h"
 #include "uv2.h"
+#include "ai_panel.h"
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -77,6 +78,8 @@ class Window : public QMainWindow {
     QTabWidget *mainTabs_;
     TransferPanel *transfer_;
     bool transferRunning_ = false;
+    AiPanel *ai_;
+    bool aiRunning_ = false;
     QString smokeOutput_, smokeCapture_;
     int cachedChannel_ = -1;
     bool cachedInvert_ = false;

@@ -2,6 +2,7 @@
 #include "transfer.h"
 #include <QMouseEvent>
 #include <QPainter>
+#include <QSet>
 #include <QWheelEvent>
 #include <algorithm>
 #include <numeric>
@@ -50,22 +51,47 @@ void TransferViewport::setCaption(const QString &caption) {
     caption_ = caption;
     update();
 }
+void TransferViewport::setUncoveredOverlay(bool enabled) {
+    uncoveredOverlay_ = enabled;
+    update();
+}
 void TransferViewport::setCamera(const OrbitCamera &c) {
+    const bool changed = camera_.yaw != c.yaw || camera_.pitch != c.pitch || camera_.distance != c.distance ||
+                         camera_.fieldOfView != c.fieldOfView || camera_.pan.x != c.pan.x ||
+                         camera_.pan.y != c.pan.y || camera_.pan.z != c.pan.z ||
+                         camera_.orthographic != c.orthographic;
     camera_ = c;
     update();
+    if (changed)
+        emit cameraChanged(camera_); // Linked viewports must not bounce identical cameras forever.
+}
+void TransferViewport::setFieldOfView(float degrees) {
+    if (!std::isfinite(degrees) || degrees < 5 || degrees > 90)
+        return;
+    constexpr float radians = 3.14159265359f / 360;
+    camera_.distance *= std::tan(camera_.fieldOfView * radians) / std::tan(degrees * radians);
+    camera_.fieldOfView = degrees;
+    update();
+    emit cameraChanged(camera_);
 }
 void TransferViewport::setFraming(V3 center, float scale) {
     center_ = center;
     scale_ = scale;
 }
 void TransferViewport::fit() {
+    const float fov = camera_.fieldOfView;
+    const bool orthographic = camera_.orthographic;
     camera_ = {};
-    camera_.distance = scale_ * 1.2f;
+    camera_.fieldOfView = fov;
+    camera_.orthographic = orthographic;
+    camera_.distance =
+        scale_ * 1.2f * std::tan(20.f * 3.14159265359f / 180) / std::tan(fov * 3.14159265359f / 360);
     update();
     emit cameraChanged(camera_);
 }
 void TransferViewport::initializeGL() {
     initializeOpenGLFunctions();
+    cacheUploads_ = false;
     glGenVertexArrays(1, &vao_);
     glGenBuffers(1, &vbo_);
     auto solid = [&](QColor c) {
@@ -77,6 +103,7 @@ void TransferViewport::initializeGL() {
     flatNormal_ = solid(QColor(128, 128, 255));
     gray_ = solid(QColor(128, 128, 128));
     black_ = solid(Qt::black);
+    cacheUploads_ = true;
     shader_ = std::make_unique<QOpenGLShaderProgram>();
     shader_->addShaderFromSourceCode(QOpenGLShader::Vertex, R"(#version 330 core
 layout(location=0) in vec3 position;layout(location=1) in vec3 normal;layout(location=2) in vec2 uv;layout(location=3) in vec4 tangent;
@@ -84,18 +111,22 @@ uniform mat4 mvp;uniform mat4 view;out vec3 N;out vec4 T;out vec2 UV;out vec3 V;
 void main(){gl_Position=mvp*vec4(position,1);N=normal;T=tangent;UV=uv;V=(view*vec4(position,1)).xyz;})");
     shader_->addShaderFromSourceCode(QOpenGLShader::Fragment, R"(#version 330 core
 in vec3 N;in vec4 T;in vec2 UV;in vec3 V;out vec4 color;
-uniform sampler2D baseTex,normalTex,roughTex,metalTex,occTex,displayTex;
-uniform bool raw,normalDX;uniform mat3 viewRot;
+uniform sampler2D baseTex,normalTex,roughTex,metalTex,occTex,displayTex,coverageTex;
+uniform bool raw,normalDX,showUncovered,orthographic;uniform mat3 viewRot;uniform float stripePeriod;
 void main(){
  vec2 uv=vec2(UV.x,1-UV.y);
  vec4 base=texture(baseTex,uv);
  int bayer[16]=int[16](0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5);ivec2 p=ivec2(gl_FragCoord.xy)%4;
  if(base.a<(float(bayer[p.y*4+p.x])+.5)/16.)discard;
+ if(showUncovered && texture(coverageTex,uv).r<.5){
+  float stripe=step(.5,fract((gl_FragCoord.x+gl_FragCoord.y)/stripePeriod));
+  color=vec4(mix(vec3(.07,.035,.045),vec3(.92,.12,.19),stripe),1);return;
+ }
  if(raw){color=vec4(texture(displayTex,uv).rgb,1);return;}
  vec3 n=normalize(N);vec3 t=T.xyz-n*dot(n,T.xyz);
  if(dot(t,t)>1e-12){t=normalize(t);vec3 b=T.w*cross(n,t);vec3 tn=texture(normalTex,uv).xyz*2-1;if(normalDX)tn.y=-tn.y;n=normalize(t*tn.x+b*tn.y+n*tn.z);}
  vec3 nv=normalize(viewRot*n);if(!gl_FrontFacing)nv=-nv;
- vec3 v=normalize(-V);if(dot(nv,v)<0)nv=-nv;
+ vec3 v=orthographic?vec3(0,0,1):normalize(-V);if(dot(nv,v)<0)nv=-nv;
  vec3 albedo=pow(base.rgb,vec3(2.2));float r=clamp(texture(roughTex,uv).r,.04,1);float m=texture(metalTex,uv).r;float ao=texture(occTex,uv).r;
  vec3 f0=mix(vec3(.04),albedo,m);vec3 diffuse=albedo*(1-m);
  vec3 L=normalize(vec3(.45,.7,.55));vec3 H=normalize(L+v);float nl=max(dot(nv,L),0),nh=max(dot(nv,H),0);
@@ -109,40 +140,56 @@ void main(){
     shader_->link();
     geometryDirty_ = texturesDirty_ = true;
 }
-unsigned TransferViewport::upload(const QImage &image) {
-    QImage im = image.convertToFormat(QImage::Format_RGBA8888);
+unsigned TransferViewport::upload(const QImage &image, bool mask) {
+    const auto key = qMakePair(image.cacheKey(), mask);
+    auto cached = textureCache_.find(key);
+    if (cacheUploads_ && cached != textureCache_.end()) {
+        cached->used = ++textureClock_;
+        return cached->id;
+    }
+    QImage im = image.convertToFormat(mask ? QImage::Format_Grayscale8 : QImage::Format_RGBA8888);
     unsigned tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, im.bytesPerLine() / 4);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, im.bytesPerLine() / (mask ? 1 : 4));
     glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
     glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, im.width(), im.height(), 0, GL_RGBA, GL_UNSIGNED_BYTE, im.constBits());
+    glTexImage2D(GL_TEXTURE_2D, 0, mask ? GL_R8 : GL_RGBA8, im.width(), im.height(), 0,
+                 mask ? GL_RED : GL_RGBA, GL_UNSIGNED_BYTE, im.constBits());
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    glGenerateMipmap(GL_TEXTURE_2D);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    if (mask) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_RED);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ONE);
+    }
+    if (!mask)
+        glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mask ? GL_NEAREST : GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mask ? GL_NEAREST : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, mask ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, mask ? GL_CLAMP_TO_EDGE : GL_REPEAT);
     // GL_TEXTURE_MAX_ANISOTROPY (core in 4.6, universally available as an extension).
-    glTexParameterf(GL_TEXTURE_2D, 0x84FE, 8.f);
+    if (!mask)
+        glTexParameterf(GL_TEXTURE_2D, 0x84FE, 8.f);
     glGetError();
+    if (cacheUploads_) {
+        const quint64 bytes = quint64(im.width()) * im.height() * (mask ? 1 : 4) * (mask ? 1. : 4. / 3.);
+        textureCache_[key] = {tex, bytes, ++textureClock_};
+        textureBytes_ += bytes;
+    }
     return tex;
 }
 void TransferViewport::releaseTextures() {
-    for (const GpuMaterial &m : gpu_) {
-        for (unsigned t : {m.base, m.normal, m.roughness, m.metallic, m.occlusion})
-            if (t)
-                glDeleteTextures(1, &t);
-        for (unsigned t : m.maps)
-            glDeleteTextures(1, &t);
-    }
+    for (const auto &t : textureCache_)
+        glDeleteTextures(1, &t.id);
+    textureCache_.clear();
+    textureBytes_ = 0;
     gpu_.clear();
 }
 void TransferViewport::uploadTextures() {
-    releaseTextures();
+    gpu_.clear();
     for (auto it = materials_.begin(); it != materials_.end(); ++it) {
         const PreviewMaterial &m = it.value();
         GpuMaterial g;
@@ -152,9 +199,30 @@ void TransferViewport::uploadTextures() {
         g.roughness = up(m.roughness);
         g.metallic = up(m.metallic);
         g.occlusion = up(m.occlusion);
+        g.coverage = m.coverage.isNull() ? 0u : upload(m.coverage, true);
         for (auto map = m.maps.begin(); map != m.maps.end(); ++map)
-            g.maps[map.key()] = up(map.value());
+            g.maps[map.key()] = !m.coverage.isNull() && map.value().cacheKey() == m.coverage.cacheKey()
+                                    ? g.coverage
+                                    : up(map.value());
         gpu_[it.key()] = g;
+    }
+    QSet<unsigned> active;
+    for (const auto &m : gpu_) {
+        for (unsigned id : {m.base, m.normal, m.roughness, m.metallic, m.occlusion, m.coverage})
+            active.insert(id);
+        for (unsigned id : m.maps)
+            active.insert(id);
+    }
+    while (textureBytes_ > 256ull * 1024 * 1024) {
+        auto oldest = textureCache_.end();
+        for (auto it = textureCache_.begin(); it != textureCache_.end(); ++it)
+            if (!active.contains(it->id) && (oldest == textureCache_.end() || it->used < oldest->used))
+                oldest = it;
+        if (oldest == textureCache_.end())
+            break; // Active maps may exceed the cache budget; never delete a bound map.
+        glDeleteTextures(1, &oldest->id);
+        textureBytes_ -= oldest->bytes;
+        textureCache_.erase(oldest);
     }
     texturesDirty_ = false;
 }
@@ -174,7 +242,8 @@ void TransferViewport::uploadGeometry() {
         v.reserve(order.size() * 36);
         for (int i : order) {
             const Triangle &t = scene_->tris[i];
-            QString material = t.material >= 0 && t.material < scene_->materials.size() ? scene_->materials[t.material] : "";
+            QString material =
+                t.material >= 0 && t.material < scene_->materials.size() ? scene_->materials[t.material] : "";
             if (ranges_.empty() || ranges_.back().material != material)
                 ranges_.push_back({material, (int)(v.size() / 12), 0});
             for (int k = 0; k < 3; k++) {
@@ -215,8 +284,15 @@ void TransferViewport::paintGL() {
         uploadTextures();
     if (scene_ && shader_->isLinked()) {
         QMatrix4x4 projection, view;
-        projection.perspective(40.f, (float)width() / std::max(1, height()),
-                               std::max(scale_ * .0001f, camera_.distance - scale_ * 2), camera_.distance + scale_ * 4);
+        const float aspect = (float)width() / std::max(1, height());
+        if (camera_.orthographic) {
+            const float half = camera_.distance * std::tan(camera_.fieldOfView * 3.14159265359f / 360);
+            projection.ortho(-half * aspect, half * aspect, -half, half, camera_.distance - scale_ * 2,
+                             camera_.distance + scale_ * 4);
+        } else
+            projection.perspective(camera_.fieldOfView, aspect,
+                                   std::max(scale_ * .0001f, camera_.distance - scale_ * 2),
+                                   camera_.distance + scale_ * 4);
         view.translate(camera_.pan.x, camera_.pan.y, -camera_.distance);
         view.rotate(camera_.pitch, 1, 0, 0);
         view.rotate(camera_.yaw, 0, 1, 0);
@@ -226,9 +302,13 @@ void TransferViewport::paintGL() {
         shader_->setUniformValue("view", view);
         shader_->setUniformValue("viewRot", view.normalMatrix());
         shader_->setUniformValue("normalDX", normalDX_);
+        shader_->setUniformValue("orthographic", camera_.orthographic);
         shader_->setUniformValue("raw", !display_.isEmpty());
-        const char *names[] = {"baseTex", "normalTex", "roughTex", "metalTex", "occTex", "displayTex"};
-        for (int i = 0; i < 6; i++)
+        shader_->setUniformValue("showUncovered", uncoveredOverlay_ && display_ != "COVERAGE");
+        shader_->setUniformValue("stripePeriod", float(12 * devicePixelRatioF()));
+        const char *names[] = {"baseTex", "normalTex",  "roughTex",   "metalTex",
+                               "occTex",  "displayTex", "coverageTex"};
+        for (int i = 0; i < 7; i++)
             shader_->setUniformValue(names[i], i);
         glBindVertexArray(vao_);
         for (const Range &r : ranges_) {
@@ -241,8 +321,9 @@ void TransferViewport::paintGL() {
                                 g.roughness ? g.roughness : gray_,
                                 g.metallic ? g.metallic : black_,
                                 g.occlusion ? g.occlusion : white_,
-                                display};
-            for (int i = 0; i < 6; i++) {
+                                display,
+                                g.coverage ? g.coverage : white_};
+            for (int i = 0; i < 7; i++) {
                 glActiveTexture(GL_TEXTURE0 + i);
                 glBindTexture(GL_TEXTURE_2D, bound[i]);
             }
@@ -271,8 +352,10 @@ void TransferViewport::mouseMoveEvent(QMouseEvent *e) {
         camera_.pitch = std::clamp(camera_.pitch + d.y() * .5f, -89.f, 89.f);
     }
     if (e->buttons() & (Qt::RightButton | Qt::MiddleButton)) {
-        camera_.pan.x += d.x() * camera_.distance / std::max(1, height());
-        camera_.pan.y -= d.y() * camera_.distance / std::max(1, height());
+        const float lens =
+            std::tan(camera_.fieldOfView * 3.14159265359f / 360) / std::tan(20.f * 3.14159265359f / 180);
+        camera_.pan.x += d.x() * camera_.distance * lens / std::max(1, height());
+        camera_.pan.y -= d.y() * camera_.distance * lens / std::max(1, height());
     }
     update();
     emit cameraChanged(camera_);

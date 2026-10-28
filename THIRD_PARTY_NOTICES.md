@@ -15,3 +15,20 @@ The application is built from its supplied C++ source with the following compone
 Qt's bundled third-party code includes image codecs, compression libraries, text/font shaping, and platform integration. The exact component/version/license/copyright mapping is supplied in the two Qt SPDX JSON files. The Qt source archives, when retrieved by the packaging helper, accompany the release under `dist/qt-sources/`; they contain the unmodified corresponding source and its original license notices. Source rebuild instructions are included in those archives. The application's CMake project supports linking against a replacement compatible Qt build.
 
 Generated sample geometry and textures were created specifically for this application and do not contain third-party art.
+
+## Optional AI Texturing
+
+The main application/source archives include only the native module, small download manifest,
+worker/extraction scripts, and `ai/AI_NOTICES.md`. No Python, PyTorch, or model weights are bundled.
+Qt Network uses the existing Qt base LGPL distribution and Windows Schannel TLS backend.
+
+The default image model, GPT Image 2, is an OpenAI cloud service reached through the user's own
+Codex/ChatGPT sign-in or OpenAI API key; no OpenAI software or model is bundled or downloaded.
+
+The optional local-engine setup retrieves release-pinned official embeddable Python and prebuilt
+binary wheel archives, plus the gated Fibo 2.0 Edit Turbo model components (Bria, CC BY-NC 4.0).
+Each archive's original license/notice files
+are retained in the private installation. `ai/manifest.json` records precise versions and file
+provenance; `ai/AI_NOTICES.md` describes the separate PSF, BSD, Apache, and NVIDIA obligations.
+The release maintainer must audit the exact downloaded binary dependency licenses before
+redistributing an assembled offline pack. Downloading components does not change their licenses.

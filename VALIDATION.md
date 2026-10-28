@@ -62,3 +62,620 @@ Buffer counts exclude CUDA/OptiX context, driver cache, and viewport allocations
 ## Remaining practical limits
 
 Tests cover generated fixtures and one user-supplied FBX, not every FBX exporter or malformed file. The user's hair mask was not supplied. The 3D preview uses 8-bit AO and ordered opacity dithering; baking/export use graded transmission and full float/16-bit precision. Noise remains sampling-dependent. Running the portable app on a separate clean Windows installation has not been tested; the package is validated locally with development paths removed.
+## AI Texturing validation
+
+`fornaio_ai_tests` exercises material-local UV validation, capture/projection orientation,
+hidden-surface rejection, material exclusion, projection masks, linear-light sampling,
+padding/coverage separation, accepted-color preservation, cancellation, project round trips,
+manifest path/URL rejection, native HTTP resume, corrupt-cache rejection, and the standard-library
+fake worker protocol. Existing UI tests also cover construction of the third tab and existing
+AO/transfer behavior.
+
+Real model checks on October 26, 2026 used the RTX 4090 and the pinned 18.91 GB catalogue.
+The native downloader fetched and verified every component, extracted the private runtime,
+ran a real generation health check, and atomically activated the engine. A Windows NumPy DLL
+initialization stall was resolved by importing native AI libraries before starting the pipe reader.
+No system Python, pip, compiler, account, or API key was used by the installed engine.
+
+Real 1024-square, four-step generations completed on hard-surface, organic, and multi-material
+fixtures. Warm-cache organic and multi-material probes took approximately 21–22 seconds including
+weight loading after library startup, with about 9,713 MiB peak PyTorch allocation. The memory-saving
+organic probe took approximately 25 seconds and peaked at 2,468 MiB on the same card. These are
+PyTorch allocation measurements, not total device usage or guarantees on smaller cards.
+
+The module remains experimental: general image-editing guidance can drift at geometry edges,
+invent details, and bake lighting into color. Physical 12 GB/16 GB card tests and a separate clean
+Windows machine remain release validation requirements. Inspect generated views and coverage;
+the fake worker is not evidence of model quality.
+
+The portable/source archive scan confirms that no model weights, wheels, private Python,
+or inference libraries are present. Optional AI assets in the application total about 39 KB
+(manifest, worker, extraction helper, and notices). Native regression coverage additionally
+checks offline copying, GPU-check deferral, preservation of an existing installation, and
+restoration of a project using a non-default UV set.
+
+### AI workflow fixes in 1.2.1 (October 26, 2026)
+
+The native AI suite passes 16 checks (including initialization/cleanup), and the
+existing UI suite passes all 9. Three Python diagnostic tests also pass. Added
+coverage checks a 512-square atlas projected from a 64-square steeply sloped view:
+its interior has zero uncovered texels and zero white-background contamination.
+Further tests check gradual seam color correction, exact preservation of accepted
+paint, UV-island isolation, worker reuse, release before other GPU jobs, and shared
+mask painting between the side preview and full-size canvas. Generation leaves
+the 3D tab visible; the panel screenshot was inspected.
+
+Two real 1024-square generations reused a single worker on the RTX 4090. Libraries
+and weights loaded only once. With the optional second cleanup pass enabled, the
+organic fixture took 46.58 s for the initial request (including weights) and 39.27 s
+for the next request, peaking at 10,231 MiB PyTorch allocation. The white-background
+silhouette diagnostic reported 98.8% overlap. This measures silhouette only: the
+generated stem and internal shading are still examples of model hallucination.
+
+The optional cleanup pass reduced some lighting on the box fixture but did not
+remove lighting differences between faces. It is disabled by default because it
+adds inference time without reliably satisfying the albedo quality gate. Stock
+Klein still fails the requirement for reliably unlit, geometry-locked textures.
+This update fixes reproducible projection cracks and improves seams; it does not
+establish production-quality multi-view consistency or lighting-free albedo.
+
+UltraTex's [training source](https://github.com/yiboz2001/UltraTex/blob/main/train_flux2.py)
+uses ground-truth albedo and joint six-view geometry-conditioned training. Its
+[released 9B adapter](https://github.com/yiboz2001/UltraTex#weights) is incompatible
+with Klein 4B. Its inference script outputs multi-view images; the inspected code
+does not supply a UV seam-blending or general image-delighting filter to transplant.
+Fornaio's seam correction is its own linear-light, island-local projection step.
+Reliable albedo and strict geometry adherence remain a model-quality requirement,
+rather than a passing result of these UI/projection fixes.
+
+### Compact Marigold recovery in 1.2.2 (October 26, 2026)
+
+Replaced the second Klein edit with Marigold IID Lighting v1.1, revision
+`08c3930bb641abf786ba44ce92547507ebefbc16`. Its 15 inference/notice files total
+2.582 GB; only the three FP16 Safetensors weights are included. There are no
+Marigold V2, Qwen image-editing, PEFT, duplicate FP32, or training downloads.
+The full optional catalogue is 21,495,284,878 bytes. Existing cached Klein/runtime
+objects retain their hashes and are reused. The previous working engine is preserved.
+
+An isolated native installation verified all 81 cached components, extracted a
+fresh private runtime, exercised both models, and activated it atomically. The
+user's installed engine was left unchanged. No pip or system Python was used by
+the installed engine. Regression results: 17 native AI checks, 9 UI checks,
+5 Python checks, and the existing CLI core/GPU/transfer/UV2 self-tests all passed.
+New checks cover compact pack size/FP16 selection, old/missing/incompatible IID
+installations, linear-to-sRGB conversion, rejection of invalid predictions,
+selection of albedo rather than shading/residual, and raw-preview project restoration.
+
+On the RTX 4090, two real 1024-square box generations with recovery reused a
+single worker: 28.58 s initially (including weights) and 20.25 s next, excluding
+4.6 s of library startup. Both models loaded only once. The warm recovery stage
+took about 1.5 s; peak PyTorch allocation was 10,230 MiB. A real organic generation
+in the memory-saving profile took 34.27 s including weights, plus 4.5 s library
+startup, and peaked at 2,742 MiB. This is allocation on a 24 GB card, not a
+physical 12/16 GB hardware validation or a measurement of total device memory.
+
+Box and organic outputs were inspected against their original generations.
+Recovery flattens broad shading and reduces highlights, but can soften scratches,
+desaturate color, and leave differences between faces or small-scale illumination.
+This remains an experimental estimate of albedo, not a passed production quality
+gate for lighting-free, consistent multi-view textures. The original generation
+can be compared in either canvas; projection always uses the recovered candidate.
+Both images survive project restoration. Geometry diagnostics use the raw image
+so a tinted recovered background does not cause a false silhouette failure.
+
+Model license notices are provided before download and retained in the optional
+pack, including the inherited SD2 use restrictions. App/source packaging excludes
+weights and the private inference runtime. Physical smaller-card tests and a
+separate clean Windows machine remain outstanding validation requirements.
+
+### Projection blending in 1.2.3 (October 26, 2026)
+
+The AI suite passes 29 checks, including a real 4096-square projection/overlap
+test, and the existing UI suite passes 9. The 5 Python checks and CLI
+core/GPU/transfer/UV2 self-tests also pass. New coverage checks linear-light
+overlap, camera-quality preference, rejection of repeated inferior views,
+camera-space mask falloff, soft transitions into existing coverage, occlusion
+edge feathering, hidden-surface/material protection, UV-island isolation,
+strength/angle controls, color matching, zero strength, and quality-aware
+automatic view selection. Confidence survives 16-bit PNG serialization,
+project restoration, and undo/redo; version-1 projects without it still load.
+
+A controlled two-camera curved-mesh fixture uses an aligned checker pattern
+with deliberately different view colors. Across 157 boundary samples away from
+checker edges, the mean red-channel step fell from 6.484 levels with the previous
+fill-only correction to 0.987 with the default blend and color matching (8-bit
+scale). Checker contrast remained 55.37 levels against a 60-level reference.
+The unlit 3D comparison and atlas images were inspected. This demonstrates the
+projection transition on aligned content; it does not measure real-model
+multi-view consistency or guarantee that contradictory generated features will
+blend without ghosts.
+
+The 4K plane test took approximately 6.01 s for an initial projection and 7.78 s
+for an overlapping projection on this machine, including padding. This is CPU
+projection time, separate from inference. sRGB decoding uses an exact 8-bit
+lookup table, and overlap propagation starts at the boundary. Projection and
+automatic quality checks run on the native background thread with cancellation.
+
+Modddif's documented camera layers, quality blending, strength, masks, and color
+matching informed the design. Its public documentation provides no exact
+weighting formula; Fornaio implements its own camera-quality comparison and
+feathering. Research and implementation notes are in `ai/PROJECTION_BLENDING.md`.
+This update adds no AI components or model downloads. Existing saved colors are
+retained; new projections in older projects default to Blend views.
+
+### Repainting covered areas in 1.2.4 (October 26, 2026)
+
+The former quality-based default could reject a new projection on a fully
+covered mesh; automatic view selection could skip it as well. The generation
+prompt also explicitly preserved existing paint. Camera projection (repaint) is
+now the UI default and applies camera/mask falloff without comparing against old
+confidence. Its automatic pass considers visible influence even when coverage is
+complete. Quality blending and fill-only remain explicit preservation choices.
+Color matching defaults off, repaint prompts allow replacing old colors, and a
+new repaint pass does not restore the old first-view appearance anchor.
+
+All 32 native AI checks, 9 UI checks, and 7 Python checks pass. New tests cover
+red-to-blue-to-green projection on fully covered atlases, repainting from a weaker
+camera, repeated clicks on the Project button with no coverage changes, automatic
+selection of covered views, repaint versus preservation prompts, and migration of
+1.2.3 projects. Explicit mode choices saved with the new behavior version round
+trip, while migration leaves saved atlas colors intact.
+
+A real offline Klein/Marigold test on the RTX 4090 used a fully red textured box
+as context and requested blue ceramic with white flowers. The inspected result
+replaced the red appearance with the requested blue floral pattern. Generation
+and albedo recovery took 28.45 s including weights, plus 4.9 s library startup,
+with 10,230 MiB peak PyTorch allocation. Silhouette overlap was 94.7%; this verifies
+repainting behavior, not perfect geometry adherence or multi-view consistency.
+The test reused the user's installed engine without changing its files or
+downloading components. Model/runtime manifests remain unchanged.
+
+### Fresh image generation and coverage hatching in 1.2.5 (October 26, 2026)
+
+All 34 native AI checks, 9 existing UI checks, 9 Python checks, and the CLI
+core/GPU/transfer/UV2 self-tests pass. New checks verify that repaint requests
+serialize neutral geometry instead of the painted atlas, omit generated anchors,
+choose different seeds by default, retain fixed-seed reproducibility, and reuse
+the same running worker. Worker input selection independently rejects atlas and
+anchor feedback for repainting, including when those files are missing. Explicit
+quality/fill preservation modes retain their appearance context. Multiview
+repainting does not create a generated appearance anchor.
+
+An OpenGL framebuffer test verifies red hatching only on uncovered surface areas,
+in both lit and unlit display, disappearance when coverage becomes complete, and
+an unaffected binary coverage view. Atlas/export colors remain unchanged.
+Texture Transfer leaves this optional overlay off. Coverage uses a separate
+nearest-filtered R8 texture without mipmaps, independent of padded color.
+
+The generation panel was inspected using the application's actual Fusion theme
+and stylesheet: Single/Multiview, square image preview, prompt, reference images
+with add/remove controls, and the teal Generate button. The 3D view and full-size
+candidate tab remain available. Project acceptance stays in the fixed bottom bar,
+accessible while scrolling or inspecting the full-size image. Project tests restore generation mode, random or
+fixed seed preference, seed value, hatch visibility, both candidate images, and
+the shared painted mask. Blend and generation settings remain collapsible.
+
+A real offline Klein plus Marigold run on the RTX 4090 succeeded with deliberately
+nonexistent painted-atlas and generated-anchor paths. It generated the requested
+blue ceramic/floral cube from neutral geometry guides and a prompt. Generation
+and albedo recovery took 27.45 s after library startup, including model loading,
+with 10,230 MiB peak PyTorch allocation. Silhouette overlap was 86.9%. The image
+was inspected; this checks the fresh-input path, not perfect alignment or seamless
+detail consistency between independently generated views. The installed engine
+was reused without modifications or additional downloads. Physical 12/16 GB and
+clean-machine validation requirements from earlier releases remain outstanding.
+
+### Continuous projection joins in 1.2.6 (October 26, 2026)
+
+The reported second-view patching was reproduced by projecting onto a partly
+painted atlas from a grazing camera. Newly covered texels used the new image at
+full strength, while adjoining old paint used angle-dependent opacity. Repaint
+mode bypassed the old overlap band. The largest adjacent red-channel step in the
+controlled fixture was 244 levels. The new camera-space coverage transition
+reduces it to 13 levels at both 100% and 25% strength; a feathered-mask fixture
+has a 6-level maximum step. Away from the join, ordinary camera opacity remains
+unchanged, and excluded paint is preserved.
+
+The join follows visible geometry across a split UV seam while leaving the atlas
+gutter unpainted. Material, disconnected-surface, mask, and depth barriers prevent
+propagation to unrelated surfaces. It samples current atlas coverage through
+frozen capture UV coordinates; reprojecting the same candidate does not reuse
+stale coverage from generation time. Feather fields are sampled continuously.
+
+A second fixture uses 18,432 small triangles on a rotated plane, a 64-square
+capture, and a 256-square atlas. The old nearest-pixel triangle identity check
+left 30,389 unpainted texels in the 216-square interior. Consistent shared-edge
+rasterization, exact visibility fallback through a native CPU BVH, and connected
+surface sampling reduce that count to zero without white background contamination.
+A connected folded-sheet fixture verifies that a front surface only 0.0001 model
+units away still occludes the rear surface; relaxing triangle identity does not
+simply allow projecting through it.
+
+All 38 native AI checks, 9 existing UI checks, 9 Python checks, and CLI
+core/GPU/transfer/UV2 self-tests pass. The 4K fixture took approximately 3.5 s for
+initial projection and 8.0 s for overlap on this machine. These are controlled
+projection tests, not validation on the user's exact head mesh. No image-model
+or runtime changes were made, and no additional AI downloads are needed.
+
+Existing projected colors are preserved on load. To compare the same candidate
+with the fix, undo the affected projection in the existing session before saving,
+then reopen the project in 1.2.6 and project it again. Project files retain the
+candidate and mask, so generation does not need to run again for this comparison.
+
+### Confidence-weighted generation in 1.2.7 (October 26, 2026)
+
+Generation now uses reliable accepted paint as spatial context instead of choosing
+between an unfiltered viewport and fully independent views. Keep previous details
+defaults to 80%; zero selects fresh generation in every projection mode. Tests
+verify full-color reuse in strong cores, neutral input for weak falloff/uncovered
+pixels, monotonic reuse as the control increases, and unchanged warm-worker reuse.
+The worker receives the filtered guide and reuse mask, not a raw atlas/anchor.
+
+The trusted-detail lock runs after Marigold, with a narrow image-space boundary.
+The native projector also retains original atlas texels in locked cores, preventing
+progressive resampling and confidence erosion from later oblique projections.
+Tests verify exact retained atlas color, stable original confidence through repeat
+projections, free weak/empty regions, and the absence of a conflicting generated
+detail inside locked cores. Project restoration retains the control value, lock
+preference, material crop, retained mask, and original source-confidence snapshot.
+
+All 40 native AI checks, 9 existing UI checks, 16 Python checks, and CLI
+core/GPU/transfer/UV2 self-tests pass. The final UI/snapshot checks were repeated
+after the compact panel adjustment, using Fornaio's Fusion theme and stylesheet.
+The previous image, prompt, references, continuity control, and Generate button
+remain visible together at the tested default size.
+
+A real offline RTX 4090 test projects the earlier blue floral ceramic result,
+rotates the camera by 40 degrees, and generates a second view with 80% continuity.
+14,577 fully retained image pixels are identical to accepted paint after intrinsic
+recovery (maximum RGB change zero). A trusted material crop is necessary to
+encourage continuation when overlap is small; it is selected only from reliable
+paint and enlarged before VAE encoding. The final inspected result adds matching
+floral detail to the newly exposed face, where an earlier variant produced plain
+blue. Bright-detail pixels in a fixed 400-square new-face region increased from
+zero to 45,495. This is a diagnostic count for that fixture, not a general quality
+score. The final pass took 30.77 s after library startup, including model loading
+and albedo recovery, with 10,875 MiB peak PyTorch allocation and 82.8% raw silhouette
+overlap. New pattern layout, tone, and geometry remain generative and require
+inspection; this does not validate the user's exact head mesh or guarantee native
+masked diffusion. Physical 12/16 GB checks remain outstanding.
+
+No additional model or runtime components were downloaded or added to packaging.
+The optional manifest is unchanged. To test continuity, start from the last clean
+accepted projection and regenerate the next view; old independent candidates
+cannot acquire the new conditioning retroactively. Setting continuity to zero
+remains available for deliberate appearance changes or replacement of old paint.
+
+### Faster local generation in 1.2.8 (October 27, 2026)
+
+The slow generation was measured with Marigold disabled on the RTX 4090, driver
+617.14, using the existing offline engine (PyTorch 2.9.1+cu128, Diffusers 0.42.0).
+The 1024-square continuity fixture has five full-resolution guides and a
+512-square trusted material crop. With weights already loaded, the original
+standard offload path took 34.73 s (33.55 s in an earlier run). Instrumentation
+measured approximately 16-17 s inside VAE decode while its actual decoder took
+0.41 s: copying the preceding transformer's frozen weights back to CPU dominated
+that call. Keeping all components on the GPU raised allocation to 18,599 MiB,
+caused memory pressure, and was not selected. Reducing CPU threads did not solve
+the transfer delay. Smaller geometry guides sped up denoising but reduced fixture
+silhouette overlap; full-detail mode retains the original guide resolutions.
+
+The standard profile now retains original CPU parameter storage and restores
+those tensors when offloading, discarding unchanged GPU weights. Mutable buffers
+are copied back normally. The worker caches one prompt's CPU text embeddings,
+invalidates on the complete generated prompt, and processes current camera,
+paint, masks, and references for every request. Attention prefers Flash when
+available, then cuDNN, efficient SDPA, and the math fallback. The installed Windows
+wheel lacks Flash; preferring cuDNN reduced warm generation further. No compiler,
+new wheel, model, quantization, or LoRA is required.
+
+Final real-worker timings in seconds (cold request includes weight loading but
+excludes the 4.6 s library startup on these warm-filesystem runs):
+
+| Profile / view | Cold request | Warm request | Peak PyTorch allocation |
+| --- | ---: | ---: | ---: |
+| Standard, 1024, cleanup disabled | 21.67 | 13.08 | 10,883 MiB |
+| Standard, 512 draft, cleanup disabled | 12.03 | 3.53 | 8,559 MiB |
+| Standard, 1024, Marigold enabled | 24.38 | 14.53 | 10,884 MiB |
+| Memory saving, 1024, cleanup disabled | 33.39 | 24.94 | 3,397 MiB |
+
+These are controlled fixture measurements on a 24 GB GPU, not latency guarantees
+for all meshes, prompt/reference counts, or smaller physical cards. Model-library
+startup also varied up to about 25 s during cold-cache diagnostic runs. The first
+request still loads weights; subsequent requests use the warm worker. Different
+attention kernels can change generated fine detail, so bit-identical old model
+output is not claimed. Raw silhouette overlap was 82.74%, versus 82.77% before;
+white materials remain ambiguous under this diagnostic. Both generated resolutions
+were visually inspected. Strong retained cores remain exact: 14,577 full-detail
+pixels and 2,969 draft pixels have zero maximum RGB difference from their accepted
+guides, including full-resolution output after optional intrinsic recovery.
+
+Generation size is independent of the atlas, defaults to 1024, and is saved in
+projects with a 1024 fallback for older files. The native fake-worker test exercises
+a 512 capture/request/candidate without resizing the atlas and restores the chosen
+size from a saved project. The CPU inference checks validate storage reuse, tied
+weights, mutable buffers, idempotent release, numerical equivalence on a tiny
+model, and attention fallback/settings restoration. Prompt tests cover cache
+invalidation, bounded retention, and an encoder failure.
+
+All 40 native AI checks, 9 existing UI checks, 18 lightweight Python checks,
+3 CPU inference checks using the installed private runtime, and the CLI
+core/GPU/transfer/UV2 self-tests pass. A real model request cancelled after its
+first denoising step returned a structured cancellation error; retrying in the
+same worker succeeded with cached prompt embeddings in 3.28 s, and its image was
+pixel-identical to the completed draft fixture. Accepted-paint core checks also
+pass with cleanup disabled and enabled. No physical 12/16 GB hardware or the
+user's exact head mesh was available for this validation.
+
+The optional manifest and installed engine are unchanged. The application build
+now always refreshes shipped AI scripts, including builds with no native relink,
+so worker-only fixes cannot silently leave the previous packaged script in use.
+No optional AI binaries or models are included in application/source packaging.
+
+### Projection layer visibility in 1.2.9 (October 27, 2026)
+
+The right-side Projection layers panel lists accepted projections newest first,
+with image thumbnails, camera angles, and clickable visibility eyes. Native Qt
+check-state roles preserve keyboard toggling. The panel was visually inspected
+with Fornaio's Fusion theme and stylesheet at the tested desktop sizes; generation
+controls and the 3D viewport remain visible beside it. Extra layer-management
+icons were not added.
+
+Each new projection stores compressed, lossless UV paint operations: source color
+in linear float RGB, the effective float blend weight, and confidence contributions
+per material/texel. Compositing reuses these operations and existing UV padding instead
+of repeating inference or visibility tracing. Tests verify bit-identical color,
+coverage and confidence when restoring the original visible stack, including
+camera repaint, quality blending, overlap color matching and fill-boundary color
+correction. Isolating an upper layer removes lower-layer contributions. Retained
+cores belong to their original projection; they are not duplicated into later
+UV layers. Hiding every projection restores the unpainted base and empty coverage.
+
+Visibility updates the actual composed atlas, so the 3D preview, UV preview,
+coverage hatching, subsequent generation feedback and PNG export use visible
+layers. Visibility operations and projection acceptance share undo/redo snapshots;
+hiding a projection does not remove its record. Projects embed their layer base,
+paint operations and visibility. Files can grow substantially at large atlas sizes.
+
+Older projects retain their saved flattened paint on opening. The first visibility
+change reconstructs UV operations from their saved cameras, masks, candidate
+images and blend settings in a cancellable native worker. This can take longer;
+no AI generation or model download is needed. Subsequent toggles reuse the cache,
+including after saving/reopening. Migration is tested against a pre-layer fixture
+with its original all-visible atlas, including restoration of each projection.
+
+Native tests also cover corrupt layer payload rejection and pre-cancelled
+composition. The user's exact head mesh was not available: this
+release provides projection isolation to diagnose the reported white/jagged seam,
+and does not establish that the seam itself has been fixed. Image generation,
+runtime packs and model manifests are unchanged from 1.2.8.
+
+All 44 native AI checks, 9 existing UI checks, and CLI core/GPU/transfer/UV2
+self-tests pass. The UI test clicks the actual eye, verifies all-hidden coverage,
+undo/redo, project visibility restoration and legacy reconstruction; the layer
+panel screenshot is recorded at `artifacts/ai-layers.png`. Application and source
+archives are checked for matching current binaries/scripts and absence of large
+optional AI components.
+
+### Overlap continuity and layer responsiveness in 1.2.10 (October 27, 2026)
+
+Generation feedback now keeps actual paint RGB separate from reuse confidence.
+It retains neighboring spatial context without locking it, and protects usable
+old paint at the incoming projection's weak angle/silhouette/occlusion falloff.
+Native tests verify edge anchoring, free empty/unreliable areas, unchanged guide
+colors, and zero-strength independent generation.
+
+With Protect trusted details enabled, Klein denoising now follows the accepted
+paint's VAE/noise trajectory in masked latent tokens after each scheduler step.
+CPU tests verify packed-mask ordering, area resampling, seeded noise, next-sigma
+anchoring, partially/free tokens, dimensions, and the disabled/fresh bypass.
+The final source-RGB restoration uses the continuous trusted confidence ramp for
+new requests instead of thresholding a hard core. Legacy commands retain their
+former lock behavior. Existing pending candidates and accepted layers are not
+regenerated automatically.
+
+The supplied head project and OBJ were read without modification. It contains
+one accepted view and a pending copy of that same candidate, so the exact reported
+second pass is unavailable. A separate QA fixture uses its accepted atlases,
+saved rotated inspection camera, wood prompt, 2048 atlas and 1024 view, with
+Marigold disabled. Two real offline generations completed on the installed
+RTX 4090/Klein runtime, retaining the same worker and prompt cache. Warm request
+time was 12.78 s; reported peak tensor VRAM was 10885 MiB. A subsequent run verifies
+the smooth restoration ramp. In that candidate, 10110 pixels newly protected at
+overlap edges match the original accepted view exactly; 36129 pixels have exact
+full protection overall. Rendered projections were inspected in both cameras.
+Weak/new regions still show pattern and tone variation: these checks establish
+the stronger preservation behavior, not seamless texturing for every view or a
+reproduction of the missing second candidate. No 12/16 GB hardware was tested.
+
+Visibility caches recent composed atlases (256 MiB CPU budget), decoded UV paint
+operations (128 MiB), and recent GPU preview textures (256 MiB, active maps may
+exceed the budget). Uniform UV padding is deferred until the end of composition;
+mixed padding retains per-layer behavior. Exact layer color/coverage/confidence
+tests still pass. Eye updates reuse thumbnails, and UV thumbnails resize only
+while their tab is visible. The real Qt/OpenGL test verifies reused texture IDs,
+shared albedo/coverage handles, synchronous cached visibility and undo/redo.
+Cached show/hide measured 0–9 ms in the 1024-atlas two-layer fixture. An uncached
+combination still composes asynchronously; legacy reconstruction remains a
+one-time cost, so these measurements do not imply every first toggle is instant.
+
+All 45 native AI tests, 9 existing UI tests, 19 lightweight worker tests, 5 optional
+runtime CPU tests, and CLI core/GPU/transfer/UV2 self-tests pass. The engine
+manifest, runtime pack and model weights are unchanged; no AI downloads are added.
+Real masked-generation cancellation after the first denoising step returned a
+structured cancellation error. Retrying in the same worker succeeded with cached
+prompt embeddings in 3.28 s for the 512 draft fixture, without reloading weights.
+
+### Projection sharpness and stable material reference in 1.2.11 (October 27, 2026)
+
+The former AI camera used 40 degrees and diagonal-based framing. Projection
+accepted cosine values above .15 (about 81.4 degrees); an uncovered texel used
+straight source color regardless of its low quality. This admitted highly
+foreshortened, low-resolution paint into coverage. New AI views default to a
+20-degree lens and fit rotated bounds inside 90% of the square capture. The
+default projection limit is 60 degrees, adjustable from 35 to 80. Influence
+smoothly reaches zero in the final ten degrees. Excluded surfaces remain
+uncovered; more views are required. This is a narrow perspective camera, not
+orthographic projection, and cannot eliminate all foreshortening.
+
+Native tests verify center-plane framing after a lens change, reduced relative
+near/far magnification, bounds fitting, matching camera matrices, lens roundtrip
+and inference from legacy matrices, and automatic-view lens retention. A rotated
+75-degree plane previously received paint and now stays unpainted at the default
+limit; a 45-degree plane remains covered. A red-on-blue overlap test spans the
+60-degree boundary and checks that its largest adjacent color step stays below
+20 levels. Linked camera notifications propagate once per changed camera rather
+than recursing. An unconditional notification introduced during implementation
+was caught as a Texture Transfer stack overflow, corrected before packaging,
+and covered by both a new two-way notification test and the existing UI suite.
+
+Generation now retains ordinary reliable overlap, including roughly the previous
+camera's central 40–45 degrees, while leaving grazing paint free. The first
+visible accepted image for the selected material supplies a full-object
+appearance reference instead of an enlarged material crop. Tests exclude hidden
+and different-material projections, preserve the selected image exactly, exclude
+all prior appearance anchors at zero continuity, and retain legacy crop fallback.
+Prompt tests check the explicit distinction between appearance and target camera.
+
+A fresh two-view fixture uses the supplied head OBJ and wood prompt without
+changing the original mesh/project. The first view uses 20-degree FOV, fitted
+bounds, a 1024 generation image and 2048 atlases. The second rotates 35 degrees,
+uses the first accepted image and camera-aligned paint/mask, and applies the
+same 60-degree projection limit. Both generated candidates and projections were
+visually inspected in both cameras: recognizable forehead/face/chest markings
+remain aligned, and grazing regions are left uncovered. A repeated real second
+request reuses its worker and prompt cache: 13.27 s warm versus 21.56 s cold,
+with peak tensor VRAM 10885 MiB on the RTX 4090. Marigold remains disabled.
+The white-background silhouette diagnostic scores 82.2% and 87.4%; this material
+is near white, so those numbers are not a ground-truth geometry measurement.
+These tests establish improved preservation and projection quality, not parity
+with Modddif or perfectly consistent new regions. Lighting/tone differences and
+model geometry drift remain possible. No physical 12/16 GB validation was added.
+
+All 49 native AI tests, 9 existing UI tests, 20 lightweight worker checks, 5
+optional-runtime CPU checks, and CLI core/GPU/transfer/UV2 self-tests pass. The
+FOV control and layer panel were visually checked in the native Qt screenshot.
+Existing saved images/UV paint retain their original cameras; opening an older
+project only narrows the live camera for future requests. No model/runtime
+manifest changes, additional AI dependencies, or model downloads are required.
+
+### Enclosed projection gaps in 1.2.12 (October 27, 2026)
+
+The 60-degree quality cutoff introduced in 1.2.11 could leave visible enclosed
+holes between previous projections. The new default-on gap fill identifies
+camera-space empty components surrounded by live accepted coverage on the same
+connected material surface. Only previously empty texels in those components
+can use the current candidate up to 80 degrees. Fresh silhouettes and accepted
+paint keep the selected angle limit. One-pixel footprint compensation into known
+camera pixels prevents a camera/UV boundary mismatch leaving a thin empty row;
+it cannot grow into another empty component. Shared triangle edges remain
+continuous. Normal visibility, mask, material and bilinear sampling checks apply.
+Fallback confidence is capped at .075, including retained candidate snapshots,
+so later generation and better camera projections can replace provisional paint.
+
+The regression fixture fills all 1,024 missing central UV texels on a 75-degree
+plane without changing accepted color/confidence outside the hole. It captures
+before removing the paint to exercise live coverage with a stale candidate.
+Frozen UV operations reproduce color, coverage and confidence exactly, and
+hiding the new layer restores the hole. The same fixture checks automatic-view
+contribution, silhouette-connected open gaps, excluded and split image masks,
+material isolation, foreground occlusion and low inherited confidence. Empty
+grazing surfaces remain unpainted. Project settings round-trip disabled gap fill,
+older projects default it on only for future projections, and new layer metadata
+records its value while legacy reconstruction defaults off.
+
+The supplied head_test2.fornaioai is loaded read-only using its embedded pending
+candidate, original projection camera/mask and confidence snapshot. Reprojecting
+with the fix adds 15,914 covered UV texels compared with strict projection and
+fills the large triangular hole behind the ear. In the saved inspection camera,
+visible empty pixels fall from 15,660 to 10,615. The crown, ear rim and underside
+still include areas outside the eligible angle/visibility region that need a
+different view. Before/strict/after images were visually inspected. The original
+project remains 81,943,759 bytes with its original modification time and SHA-256
+08920488315537337af29c4a8fd7b99897dcddfe9c445b0ae0b8de755431283d.
+
+All 50 native AI tests, 9 existing UI tests and CLI core/GPU/transfer/UV2 self-tests
+pass. Cached layer show/hide remains 3/0 ms in the native regression. Worker and
+model/runtime manifests are unchanged; no inference or new downloads are needed
+to repair this saved candidate. The native code and lightweight scripts ship
+without Python, weights or large AI dependencies.
+
+### Reference-only generation in 1.2.13 (October 27, 2026)
+
+The gray result is reproduced on the supplied head fixture with both the user's
+weathered statue photograph and a blue floral material reference, with empty text
+prompts, fixed seed 907099167, 1024 generation views and Marigold disabled. The
+reference pixels reach the pipeline: the failure is the generic image-editing
+instruction, which leaves Klein copying gray geometry. Explicit, numbered
+appearance assignment produces textured output with the same model and seed.
+The raw normal guide can tint muted references, so reference requests now use an
+achromatic normal-derived clay guide with the exact silhouette. Text-only
+requests retain their original prompt and geometry input. Reference images also
+receive EXIF orientation and alpha-safe white compositing before resizing.
+
+UltraTex's dataset sends distinct normal/appearance references into a model with
+a trained texture adapter. Fornaio uses the existing general Klein editor; no
+UltraTex weights, code, trained adapter or additional model are included. Source
+links and conditioning details are in ai/PROJECTION_BLENDING.md.
+
+A rotated second-view test exposed black reuse-mask leakage in image-only
+generation. User-reference requests now omit that mask from the editor's image
+sequence while retaining it unchanged in latent anchoring and final detail
+preservation. The final test fills newly visible regions with the reference
+material; all 137,800 fully trusted pixels retain exact accepted RGB values.
+The uploaded image, accepted-view anchor and detail crop have tested image
+numbering with/without silhouettes and multiple references. The tested prompts
+use 171 tokens for fresh views and 270 for the continuity view, below Klein's
+512-token limit. Swapping from the weathered photo to blue flowers changes the
+result while reusing the same prompt embeddings, confirming image content is
+processed afresh. No model reload or extra inference steps are introduced.
+
+The real photo request completes in 17.78 s cold including 4.77 s model setup;
+the warm blue-reference request takes 10.27 s. The final continuity check takes
+18.64 s cold including 4.70 s setup, with 12.00 s generation. Peak allocated VRAM
+is approximately 10.2 GiB on the RTX 4090. Source-photo lighting and generated
+detail/feature drift remain possible with this general editor; these tests fix
+the gray-input failure and mask/color leakage, not perfect albedo or parity with
+a texture-trained model. Original user images/projects are read-only; comparison
+artifacts remain in the ignored QA directory, outside packaging inputs.
+
+All 50 native AI tests, 9 existing UI tests, 24 lightweight worker tests, 5
+optional-runtime CPU tests and CLI core/GPU/transfer/UV2 checks pass. The native
+fake worker verifies reference-only and prompt-plus-reference request forwarding.
+Worker tests cover whitespace-only prompts, image numbering, preservation masks,
+achromatic geometry, unchanged text-only normals, EXIF rotation, and hidden alpha
+colors. Runtime tests retain exact latent mask weights with references enabled.
+Runtime/model manifests are unchanged; the standard package excludes Python,
+weights and large AI dependencies.
+
+### GPT Image 2 default, ownership multiview and alignment in 1.3.0 (October 28, 2026)
+
+Model comparison on `head.obj` at the default camera (yaw 25°, pitch 15°), one
+reference photo, three seeds, clay and Modddif-style gray guides. Offsets are
+eye/feature edge shifts against the mesh's clay shading edges at 1024 px:
+Fibo 2.0 Edit Turbo 8.3 px eyes, FLUX.2 Klein 4B 7.3, Klein 9B 2.3, Qwen-Image-Edit
+2511 0.5 (ignores the reference), Qwen-Image-2.1 3.8, LongCat-Image-Edit-Turbo 6.0
+(ignores the reference), HiDream-O1 fails the task, FLUX 3 Image Klein 3.7. Krea 2
+has no image input; HunyuanImage 3.0 needs a 48 GB GPU even in 4-bit. GPT Image 2
+(through Codex on a ChatGPT plan) measured 0.0–3.5 px eye offsets on six cases,
+including two text-only prompts, with near-flat lighting.
+
+Multiview with GPT Image 2 (49 views, six cases) projected through repaint mode
+overwrote good paint and ghosted inconsistent details. Re-projecting the same images
+with ownership (texels at confidence 0.1 or more locked, new views paint around
+them) kept every front view intact and reduced unpainted render pixels in every
+case (pencil sketch 64,427 to 6,084; android 6,523 to 3,261). A clay guard that
+ignores speckles fixed gray materials (graphite, steel) starving the loop.
+
+Seams between views come from per-view lighting/colour shifts. The tone match
+(measured on GPT's redraw of locked paint) plus a crossfade band 1/32 of the image
+wide removed the visible cheek, nose and jaw seams on replayed portrait and avatar
+views. A strongly posed reference (portrait from below) moved the painted nose
+14.4 px and mouth 11.7 px off the mesh; the appearance-only prompt plus geometry
+alignment reduced them to 2.8 px each and the unpainted mesh share from 0.72% to
+0.01%. Alignment takes 2–3 s per 1024 view.
+
+All 59 native AI tests pass (one real GPT Image 2 generation is opt-in and passed),
+9 UI tests, 14 worker tests and 2 inference tests. The optional Fibo manifest
+(`briaai/Fibo-2.0-edit-turbo`, revision b8dd54e5, 67 files, 28.41 GB) was resolved
+with a Hugging Face token; its download was not re-run after the manifest change.

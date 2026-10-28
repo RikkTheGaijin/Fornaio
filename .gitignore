@@ -6,3 +6,10 @@ artifacts/
 aqtinstall.log
 third_party/*/.git/
 graphify-out/
+__pycache__/
+*.pyc
+# AI downloads are optional external components, never application/source inputs.
+.ai-runtime/
+.ai-models/
+.ai-qa/
+*.fornaioai

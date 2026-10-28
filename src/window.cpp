@@ -77,9 +77,17 @@ Window::Window() {
     mainTabs_->addTab(root, "AO Baker");
     transfer_ = new TransferPanel;
     mainTabs_->addTab(transfer_, "Texture Transfer");
-    // Only one GPU job at a time: each tab blocks the other's start button while it runs.
+    ai_ = new AiPanel;
+    mainTabs_->addTab(ai_, "AI Texturing");
+    // All GPU owners are coordinated on the UI thread. Downloads do not own the GPU.
     connect(transfer_, &TransferPanel::runningChanged, this, [this](bool running) {
         transferRunning_ = running;
+        ai_->setExternalBusy(busy_ || running);
+        refresh();
+    });
+    connect(ai_, &AiPanel::runningChanged, this, [this](bool running) {
+        aiRunning_ = running;
+        transfer_->setExternalBusy(busy_ || running);
         refresh();
     });
     auto layout = new QVBoxLayout(root);
@@ -380,6 +388,7 @@ Window::Window() {
     refresh();
 }
 Window::~Window() {
+    ai_->shutdown();
     transfer_->shutdown();
     cancelFlag_ = true;
     if (worker_.joinable())
@@ -544,8 +553,8 @@ void Window::refresh() {
             validation_->setStyleSheet("color:#f0c477;");
         }
     }
-    bake_->setEnabled(valid && !originalMask_.isNull() && !transferRunning_);
-    bake_->setToolTip(transferRunning_ ? "Waiting for the texture transfer to finish." : QString());
+    bake_->setEnabled(valid && !originalMask_.isNull() && !transferRunning_ && !aiRunning_);
+    bake_->setToolTip(transferRunning_ || aiRunning_ ? "Waiting for the other GPU job to finish." : QString());
     const bool fbx = scene_ && meshPath_.endsWith(".fbx", Qt::CaseInsensitive);
     const QString target = fbx ? uv2Target() : QString();
     generateUv2_->setEnabled(fbx);
@@ -562,7 +571,7 @@ void Window::refresh() {
     saveSettings();
 }
 void Window::bake() {
-    if (!scene_ || !mask_ || busy_ || transferRunning_)
+    if (!scene_ || !mask_ || busy_ || transferRunning_ || aiRunning_)
         return;
     if (worker_.joinable())
         worker_.join();
@@ -570,6 +579,7 @@ void Window::bake() {
     progress_->setValue(0);
     busy_ = true;
     transfer_->setExternalBusy(true);
+    ai_->setExternalBusy(true);
     cancelFlag_ = false;
     inputs_->setEnabled(false);
     bake_->setEnabled(false);
@@ -601,7 +611,8 @@ void Window::finish(std::shared_ptr<Result> r, const QString &error) {
     if (worker_.joinable())
         worker_.join();
     busy_ = false;
-    transfer_->setExternalBusy(false);
+    transfer_->setExternalBusy(aiRunning_);
+    ai_->setExternalBusy(transferRunning_);
     inputs_->setEnabled(true);
     cancel_->setEnabled(false);
     bake_->setEnabled(true);
@@ -662,7 +673,7 @@ QString Window::uv2Target() const {
     return samePath(meshPath_, uv2Output_) || samePath(meshPath_, uv2Source_) ? uv2Output_ : QString();
 }
 void Window::generateUv2(bool chooseFile) {
-    if (!scene_ || busy_ || transferRunning_ || !meshPath_.endsWith(".fbx", Qt::CaseInsensitive))
+    if (!scene_ || busy_ || transferRunning_ || aiRunning_ || !meshPath_.endsWith(".fbx", Qt::CaseInsensitive))
         return;
     QString output = chooseFile ? QString() : uv2Target();
     // Repack from the original file rather than a previously generated copy when it still exists.
@@ -675,7 +686,7 @@ void Window::generateUv2(bool chooseFile) {
                                       : uv2Target();
         output = QFileDialog::getSaveFileName(this, "Save FBX with generated UV2", suggested, "FBX (*.fbx)");
         // The save dialog runs a nested event loop; re-check that nothing started meanwhile.
-        if (output.isEmpty() || busy_ || transferRunning_)
+        if (output.isEmpty() || busy_ || transferRunning_ || aiRunning_)
             return;
         if (!output.endsWith(".fbx", Qt::CaseInsensitive))
             output += ".fbx";
@@ -695,6 +706,7 @@ void Window::generateUv2(bool chooseFile) {
     progress_->setValue(0);
     busy_ = true;
     transfer_->setExternalBusy(true);
+    ai_->setExternalBusy(true);
     cancelFlag_ = false;
     inputs_->setEnabled(false);
     bake_->setEnabled(false);
@@ -731,14 +743,15 @@ void Window::finishUv2(const Uv2Report &report, const QString &output, const QSt
     if (worker_.joinable())
         worker_.join();
     busy_ = false;
-    transfer_->setExternalBusy(false);
+    transfer_->setExternalBusy(aiRunning_);
+    ai_->setExternalBusy(transferRunning_);
     inputs_->setEnabled(true);
     cancel_->setEnabled(false);
     elapsed_->clear();
     if (!error.isEmpty()) {
         progress_->setValue(0);
         status_->setText(error + (result_ ? " Last completed bake is still available to export." : ""));
-        bake_->setEnabled(validationCache_.ok() && scene_ && !originalMask_.isNull() && !transferRunning_);
+        bake_->setEnabled(validationCache_.ok() && scene_ && !originalMask_.isNull() && !transferRunning_ && !aiRunning_);
         if (!cancelFlag_)
             showError(error);
         return;
@@ -870,6 +883,7 @@ void Window::restoreSettings() {
     loading_ = false;
 }
 void Window::closeEvent(QCloseEvent *e) {
+    ai_->shutdown();
     transfer_->shutdown();
     cancelFlag_ = true;
     if (worker_.joinable())

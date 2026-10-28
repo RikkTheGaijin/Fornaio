@@ -4,7 +4,7 @@ A portable Windows application for baking ambient occlusion through hair-card op
 
 ## Run
 
-Open `Fornaio.exe` inside the portable folder. Keep the DLLs, plugin folders, and `bake.ptx` beside it. No installer, Python, Blender, CUDA SDK, or Substance Painter is needed to run it. All processing is local; the application has no network features.
+Open `Fornaio.exe` inside the portable folder. Keep the DLLs, plugin folders, and PTX files beside it. No installer, system Python, Blender, CUDA SDK, or Substance Painter is needed to run it. Processing is local. The optional AI Texturing setup downloads its engine and model; AO baking and texture transfer work without installing AI components.
 
 Requires Windows 10/11 x64, an NVIDIA RTX GPU, and an R590-or-newer NVIDIA driver (OptiX 9.1). Tested on the RTX 4090 with driver 617.14. See [NVIDIA's driver requirement](https://developer.nvidia.com/designworks/optix/download).
 
@@ -44,6 +44,44 @@ The second tab reprojects texture sets from one UV layout to another. Use it for
 Preview with the synchronized 3D split view (source | target) or the 2D before/after view with UV wireframes. **Save job** writes a JSON file that the CLI can run. Existing outputs are only replaced after confirmation. The GPU (OptiX) is used by default, and the CPU reference implementation is offered if the GPU fails. Only one GPU job runs at a time across both tabs.
 
 Source taps are clamped to the UV tile of each sample: a 0–1 texture never bleeds across its opposite border, while UVs outside 0–1 still repeat.
+
+## AI Texturing tab
+
+The third tab generates base-color images from mesh views and projects them into the selected UV layout. This is an experimental image-editing workflow: normal/depth guides encourage geometry alignment, but results need inspection and may contain lighting or inconsistent details.
+
+1. Choose the **Image model**. **GPT Image 2 · cloud** is the default and needs no download: Fornaio uses the Codex CLI signed in with your ChatGPT account (found on the PATH or inside the VS Code ChatGPT extension; `FORNAIO_CODEX` selects another executable), or the OpenAI Images API when `OPENAI_API_KEY` is set. The camera guide, the first reference image and the prompt are uploaded to OpenAI; your plan's image limits or API billing apply. A view takes about a minute. **Fibo 2.0 Edit Turbo · local** is optional: click **Download & Enable AI Texturing** to download the private runtime and Fibo (about 28 GB), verify SHA-256 hashes and check the model. Fibo is gated on Hugging Face: accept its license at huggingface.co/briaai/Fibo-2.0-edit-turbo, then enter an access token (or set `HF_TOKEN` / log in with the Hugging Face CLI). Fibo is CC BY-NC (non-commercial).
+2. Downloads default to `%LOCALAPPDATA%\Fornaio\AI`. **Change storage location…** selects another directory; an installed engine is copied and checked there without downloading it again. Files at the previous location are preserved, and a failed move keeps using the original engine. Cancelled downloads resume when setup is started again, including after an application restart. **Repair** rechecks downloads. **Remove** removes only AI components at the selected location.
+3. Load an FBX/OBJ, select a UV set, describe the appearance and/or add reference images. Every material needs unique, non-overlapping UVs inside 0–1; different materials may use the same UV coordinates. Static transforms are preserved.
+4. Choose **Single**, orbit the square viewport, and click **Generate image**. The left **Generate** panel places the image preview above the prompt and reference thumbnails, beside the 3D viewport. The **Generated view / mask** tab provides a larger canvas. Both canvases share the same mask: left-drag excludes areas; right-drag restores them. Inspect alignment before clicking **Project camera view** in the fixed bottom bar. Projection always uses the captured camera, even if the preview camera has moved. **Unlit base color** is the default 3D display. **Untextured areas** marks missing coverage with red/dark diagonal hatching; this preview overlay is never generated, projected, or exported.
+5. Choose **Multiview** and click **Generate** to texture the mesh from the listed cameras (front, the 45-degree ring, back and top). With GPT Image 2 each view sees the paint that earlier views projected well (locked) and gray clay elsewhere; it paints only the clay, its version of the locked pixels is replaced by the accepted paint, and only new areas are projected. Back faces are never rendered into guides, so inner surfaces such as a collar seen from behind are not painted with outer details. **Keep previous details** defaults to 80%: the next view receives a confidence-filtered rendering of accepted paint, normal/depth/silhouette guides, a reuse mask, and your prompt/references. Strong previous projections supply sharp details. Neighboring paint stays visible as context while its reuse mask permits repair; very poor paint and empty areas remain neutral. Reliable paint at the incoming projection's falloff receives extra protection. The first visible accepted view for a selected material supplies a stable full-object appearance reference, helping retain grain, crack and chip scale between cameras. Set this control to **0%** for fully independent generation. Camera projection mode can repaint covered surfaces; quality blending and fill-only remain optional projection choices. Inspect **Coverage** or the hatch overlay and add manual views for holes and cavities.
+6. The right **Projection layers** panel lists accepted views, newest first, with thumbnails and eye toggles. Hide/show projections to isolate a seam; the 3D preview, UV texture, coverage, future generation feedback, and exports use the visible stack. Visibility changes support undo/redo and never rerun AI generation. Recent compositions and GPU textures are cached for fast repeat comparisons; an uncached combination still composes in the background. Older projects reconstruct UV layers once from their saved cameras/images on the first toggle; this can take longer. Save/open a `.fornaioai` project to preserve layer data/visibility, accepted atlases, candidates, masks, settings, and camera positions. Project files embed generated images and compressed UV paint data and can be large. Mesh files must remain available and unchanged; appearance reference paths are retained.
+7. Export one sRGB `_ALB.png` per material. Edit each output name in **UV texture**. Choose 1024, 2048 (default), or 4096 atlas resolution. Generation defaults to 1024; **Generation size → 512 · Fast draft** makes smaller camera images for quicker iteration without resizing atlases. The size is saved in projects; older projects default to 1024. Exported textures must use the selected mesh UV set.
+
+**Package size:** the main application and source bundles contain no model weights, Python distribution, PyTorch, or large AI dependencies. The pinned optional Fibo download is approximately 28.4 GB; setup displays exact totals and free-space requirements. An existing cached installation downloads only the additional components. Downloads use verified, prebuilt Python/wheel archives and model files rather than resolving or compiling packages on the user's computer. Once installed, Fibo generation is offline and its descriptions, mesh renders, and references are not uploaded.
+
+The local Fibo engine requires an Ampere-or-newer RTX GPU (RTX 30 series or newer), at least 12 GB VRAM, and driver R590 or newer. **Standard** targets 24 GB; **Memory saving** uses sequential CPU offloading and tiled VAE processing for 12–16 GB cards, with slower inference and additional system-memory use. Actual smaller-card validation is recorded separately in `VALIDATION.md`.
+
+Only one GPU job runs at a time across all three tabs. Downloading does not reserve the GPU; the final setup check waits for existing GPU work. The AI worker and loaded weights stay warm between generations and projections. The standard profile retains frozen CPU weight storage to avoid copying unchanged GPU weights back after each view. The worker caches the last prompt's text embeddings and prefers fast supported attention kernels, with fallbacks. Geometry, references, and accepted paint are still processed for each new request. Starting AO or Texture Transfer, changing the memory profile/storage, repairing the engine, cancelling a job, or closing Fornaio releases the worker. Cancellation and inference failure preserve accepted projections.
+
+Expand **Mesh, materials and generation settings** for UVs, atlas resolution, memory profile, materials, mask brush, albedo recovery, and comparison with the original lighting. **New variation each generation** is on by default; disable it to use a fixed seed. The actual seed is recorded with each candidate/projection. Generation mode, seed preference, and hatch visibility are saved in projects. **Show captured geometry outline** optionally adds a cyan silhouette for inspection. A conservative white-background silhouette check on the raw generation pauses automatic projection when overlap drops below 75%. White materials can be ambiguous, and passing this check does not guarantee internal features align.
+
+**AI camera and sharpness:** **Orthographic** is on by default: views have no perspective, so every pixel sees the surface along the same direction. When you click **Generate image**, the captured camera keeps your orbit direction but re-frames the view to the mesh's view-space bounding box, filling 95% of the square image. If you have zoomed in, it frames only the part of the bounds inside the current view, so close-ups stay close. **Frame mesh** applies the same fit to the viewport; automatic views fit each direction too. Turn Orthographic off to use a perspective lens (FOV defaults to 20 degrees; changing it moves the camera to preserve framing). **Maximum projection angle** defaults to 60 degrees in Projection blending, with a smooth ten-degree falloff, and is adjustable from 35 to 80 degrees. **Paint every visible face** is on by default: untextured surfaces beyond that angle still receive the current view down to about 89 degrees, at low confidence, so a later camera-facing view replaces the stretched paint. Already textured surfaces keep the angle limit. Old accepted layers keep their original cameras and paint; regenerate views to benefit from these settings.
+
+**Keep previous details** changes how much prior paint qualifies for reuse, rather than blending every old detail at that percentage. Quality comes from the previous projection's camera angle, feather, and painted mask. More reuse includes more reliable surface; 0% excludes previous paint entirely in every projection mode. The first view is independent because no paint exists yet. **Protect trusted details** is enabled in advanced settings: it also anchors reliable paint during Klein denoising, restores strong accepted base color after generation, and protects the original atlas texels during projection. This avoids duplicated details and repeated camera/UV resampling in trusted cores. Their original confidence is retained for later views. Disable the lock to allow reinterpretation, or use 0% continuity to change the overall appearance. Continuity settings, guide snapshots, retained masks, and source confidence survive saving; changing the control affects the next generation. These changes use the existing Klein installation.
+
+**Projection blending** defaults to **Keep existing paint (paint around it)**, including automatic mode: paint that an earlier view saw well (projection confidence at least 0.1) is locked, and a new view paints only uncovered or grazing-angle areas, so independently generated views never blend different versions of a detail into ghosts. Projects saved earlier keep their saved mode. **Camera projection (repaint)** remains available: Each accepted image paints over existing texture from its captured camera, even on a fully covered mesh. Camera-facing areas receive the new image strongly; oblique surfaces and camera, silhouette, occlusion, and painted-mask edges blend with a soft falloff. Previous projection confidence does not block repainting. **Strength** controls influence (values over 100% extend it onto oblique surfaces); **Feather width** controls edge softness, and **Angle falloff** favors camera-facing surfaces. Defaults are 100% strength, 6% feather, angle falloff 2, and a 60-degree maximum angle. Strength cannot override that angle limit.
+
+Use **Blend by camera quality** to favor stronger existing projections, or **Fill uncovered only** to preserve all accepted texels. **Match colors in overlap** is optional and off by default so deliberate color changes remain visible. Generation continuity is separate from these projection controls. Excluded/occluded areas and unselected materials remain protected. Blending uses linear light and tracks coverage independently from camera confidence and padding. Undo/redo and saved projects retain confidence and settings. Projects using the former 1.2.3 default migrate to camera repainting for future projections; their saved colors remain unchanged. No additional AI downloads are required. Generated details, tone, and geometry can still differ in weak or new areas; masked denoising constrains trusted detail but does not guarantee continuity in every weak or newly generated area. Inspect the candidate and mask incorrect areas.
+
+The first release handles opaque meshes and base color. PBR generation, UDIMs, unwrapping, transparency-aware texturing, custom training, and mesh export are not included. Generated color is not guaranteed physically correct albedo. Selecting a different mesh, UV set, or atlas resolution starts a new atlas; save a project first if you need the existing result.
+
+### Maintaining the optional AI components
+
+`ai/manifest.json` pins public download URLs, exact sizes, SHA-256 hashes, model revision, and resolved dependency versions. It deliberately excludes duplicate checkpoint formats and training assets. `scripts/resolve_ai_manifest.py` refreshes this metadata at release preparation time; users never run it (Fibo is gated, so set `HF_TOKEN` or log in with the Hugging Face CLI first). Review component licenses and rerun real-engine checks before publishing a new manifest.
+
+Tests: `fornaio_ai_tests` covers capture, projection, ownership, alignment and the panel (set `FORNAIO_REAL_GPT=1` to include one real GPT Image 2 generation). `tests/ai_worker_tests.py` and `tests/ai_inference_tests.py` test the local Fibo worker with any Python that has NumPy, Pillow and PyTorch (`python -m unittest tests/ai_worker_tests.py`). `fornaio_ai_eval` drives capture, `ownproject` (the panel's GPT projection path) and rendering from scripts for end-to-end evaluation without the UI.
+
+For offline distribution, run `python scripts/ai_offline_pack.py --cache <AI-storage-directory> --out <separate-offline-pack-directory>` on a completed installation. This verifies and copies the cached components beside a manifest. Keep this large optional pack separate from Fornaio's normal download. Users select its `manifest.json` with **Import offline pack…**; it must match the bundled release catalogue.
 
 ## UV2 layout
 
@@ -95,6 +133,7 @@ The build script discovers Visual Studio and its CMake, builds the CUDA program 
 ```powershell
 .\build\Release\fornaio_cli.exe --self-test --artifacts artifacts/tests
 .\build\Release\fornaio_ui_tests.exe
+.\build\Release\fornaio_ai_tests.exe
 python scripts/integration_tests.py
 powershell -ExecutionPolicy Bypass -File scripts/package.ps1
 ```
@@ -136,6 +175,107 @@ Mirrored UV islands are supported. Overlap warnings identify the first offending
 `core` handles scene import, mask decoding, exact-area UV overlap checks, UV-island connectivity, spatial binning, PNG export, and CPU reference tracing. `gpu` owns OptiX/CUDA resources through RAII; the device kernel rasterizes AO UV subpixels and casts cosine-weighted rays. GPU work is dispatched in bounded pixel/ray batches with cancellation checks between launches. `window` and `viewport` provide the asynchronous UI and OpenGL preview. `transfer`, `transfer_gpu` and `transfer_kernel.cu` implement texture reprojection on the CPU and on OptiX. They share their sampling code through `transfer_shared.h`. `transfer_panel` and `transfer_viewport` provide the Texture Transfer tab. `fbx_binary`, `uv_pack` and `uv2` implement lossless binary FBX rewriting, skyline island packing and UV2 generation. Dependency details and licenses are in `THIRD_PARTY_NOTICES.md` and `licenses/`.
 
 ## Release notes
+
+### 1.3.0
+
+- Make **GPT Image 2** the default AI Texturing model, with no download: Fornaio uses the Codex CLI signed in with your ChatGPT account (found on the PATH or in the VS Code ChatGPT extension) or `OPENAI_API_KEY`. Replace the local Klein engine with an optional **Fibo 2.0 Edit Turbo** download (gated on Hugging Face; the installer sends your access token to huggingface.co only). Remove the Marigold albedo extension.
+- Multiview with ownership (**Keep existing paint**, the new default): paint an earlier view saw well is locked, the next view sees it and paints only gray clay, and only new areas are projected. A tone match measured on the locked area and a crossfade band at the lock's edge remove seams between views.
+- Align every generated view to the mesh before projection (local edge registration against the clay shading), and tell the model to take only appearance from the reference, never its pose. Never render back faces into generation guides.
+- Orthographic AI camera by default, framed to the mesh's view-space bounds; **Paint every visible face** fills grazing empty surfaces at low confidence; multiview camera grid with per-layer regeneration.
+
+### 1.2.13
+
+- Fix reference-image generation with an empty prompt: explicitly identify appearance images and instruct Klein to replace the untextured placeholder with their material.
+- Use an achromatic geometry guide for reference requests to keep normal-map colors from tinting the generated material. Preserve confidence-based continuity and text-only generation.
+- Normalize reference transparency and EXIF orientation before inference. No new models or downloads.
+
+### 1.2.12
+
+- Fill enclosed visible holes between accepted projections with the current candidate, allowing angles up to 80 degrees only into empty texels. Keep the sharper maximum angle on fresh outer edges and existing paint.
+- Add **Fill enclosed visible gaps**, enabled by default. Save the setting and each new layer's behavior without changing existing saved paint.
+- Keep gap fill at low confidence so a better later view can replace it. Reproject an existing candidate to repair gaps without generating again.
+
+### 1.2.11
+
+- Use a 20-degree AI camera with a FOV control, matching viewport/capture lenses, and tighter bounds-based framing. Dolly when changing the lens to preserve framing.
+- Default to a 60-degree maximum projection angle with a smooth ten-degree falloff; leave grazing surfaces uncovered instead of painting stretched edge pixels.
+- Preserve more reliable overlap during generation and use the first visible accepted view as a stable full-object appearance reference, avoiding crop-induced changes in grain scale.
+- Save lens/angle settings and retain immutable cameras and legacy projection behavior for existing layers. Keep Texture Transfer's linked cameras synchronized without notification loops.
+
+### 1.2.10
+
+- Preserve the actual color and neighboring patterns in generation feedback; anchor reliable overlap edges using the incoming camera's angle and feather.
+- Add masked latent denoising to keep accepted detail aligned throughout Klein generation, alongside the existing exact detail lock. No extra models or downloads.
+- Cache layer compositions, decoded UV operations, and GPU preview textures; avoid repeated thumbnails, UV scaling, and texture uploads when inspecting layer visibility.
+- Existing generated passes need regeneration to use the updated continuity behavior.
+
+### 1.2.9
+
+- Add a right-side **Projection layers** panel with thumbnails, camera labels, and visibility eye toggles, newest first.
+- Record lossless UV paint operations and compose visible layers without inference or mesh reprojection; preserve original float blend weights, color corrections, confidence, and padding.
+- Save layer visibility/base paint in projects and include visibility in undo/redo. Lazily reconstruct layers for existing projects using their saved images and cameras.
+
+### 1.2.8
+
+- Avoid copying unchanged Klein weights back from the GPU in the standard profile; retain CPU sources and release GPU copies after inference or cancellation.
+- Cache the most recent prompt's text embeddings and prefer fast supported attention kernels without new runtime downloads.
+- Add **Generation size** with 1024 full detail and 512 fast draft, independent of atlas resolution and saved in projects.
+- Report decoding progress and retain worker timings with candidates. Refresh packaged worker scripts even when no native code needs relinking.
+
+### 1.2.7
+
+- Add confidence-weighted feedback with **Keep previous details** (default 80%, 0% for independent generation).
+- Use strong previous paint, a reuse mask, and a trusted material crop to guide continuation while releasing weak falloff and empty regions.
+- Lock trusted details after intrinsic recovery and retain original atlas texels/confidence during projection, avoiding ghosted details and repeated resampling in reliable cores.
+- Save continuity settings, guide snapshots, retained masks, and source confidence with projects. Reuse the existing models and warm worker.
+
+### 1.2.6
+
+- Remove the opacity discontinuity between newly covered areas and previous paint in camera repaint mode, including reduced strength and feathered boundaries.
+- Blend the coverage join in camera space across geometric UV seams; keep masks, materials, disconnected surfaces, and occlusion protected.
+- Resolve ambiguous visibility at the actual surface sample with a native CPU BVH, so dense subpixel triangles do not leave coverage holes. Use consistent shared-edge rasterization and continuous sampling of the feather field.
+
+### 1.2.5
+
+- Generate fresh repaint images from neutral geometry and user references, excluding painted atlas and generated-anchor feedback in both native requests and the worker.
+- Choose a new seed per generation by default, with an optional fixed seed and project restoration.
+- Mark uncovered surfaces with a preview-only red/dark hatch based on independent coverage.
+- Reorganize the Generate panel around Single/Multiview, image preview, prompt, references, and a teal Generate button; retain the full-size image tab and advanced settings.
+
+### 1.2.4
+
+- Make camera repainting the default so new images project over fully covered areas with falloff.
+- Process covered views in automatic camera mode and allow the generation prompt to replace old paint.
+- Keep quality blending and fill-only as optional preservation modes; migrate the previous protected default.
+
+### 1.2.3
+
+- Blend overlapping AI projections by camera quality, with feathered camera/mask/occlusion boundaries and a soft overlap band.
+- Add projection mode, strength, feather width, angle falloff, and overlap color-matching controls.
+- Preserve confidence in projects/history and let automatic views improve weak projections after coverage is complete.
+
+### Unreleased
+
+- Remove the Marigold IID albedo extension; its recovery flattened detail. Existing installations keep working and ignore the leftover files.
+
+### 1.2.2
+
+- Add compact Marigold IID Lighting v1.1 albedo recovery, a 2.6 GB optional upgrade using the existing private runtime.
+- Recover albedo before projection and compare it with the original generation in either preview; preserve both in projects.
+- Retain offline inference, warm workers, verified downloads, and small application/source packages.
+
+### 1.2.1
+
+- Keep the AI worker warm between requests and release it for other modules.
+- Show the prompt, reference thumbnails, and editable generated image beside the 3D viewport.
+- Correct subpixel visibility at triangle edges, prevent white-background sampling, and match view boundaries in linear light without changing accepted paint in fill mode.
+- Add a geometry outline, conservative silhouette-drift pause, and optional experimental albedo cleanup.
+
+### 1.2.0
+
+- Experimental **AI Texturing** tab with local Klein 4B generation, manual/automatic views, masked UV projection, per-material base-color export, undo/redo, and saved projects.
+- One-click optional engine setup with checksums, resume, repair, and offline import. Large AI components are excluded from the application/source bundles.
+- Shared GPU coordination across AO, transfer, and AI work.
 
 ### 1.1.0
 

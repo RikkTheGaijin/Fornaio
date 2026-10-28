@@ -245,9 +245,10 @@ class UiTests : public QObject {
     }
     void transferTabBuildsJobAndExcludesConcurrentGpuJobs() {
         Window w;
-        QCOMPARE(w.mainTabs_->count(), 2);
+        QCOMPARE(w.mainTabs_->count(), 3);
         QCOMPARE(w.mainTabs_->tabText(0), QString("AO Baker"));
         QCOMPARE(w.mainTabs_->tabText(1), QString("Texture Transfer"));
+        QCOMPARE(w.mainTabs_->tabText(2), QString("AI Texturing"));
         QCOMPARE(w.mainTabs_->currentIndex(), 0);
         QVERIFY(w.findChild<QScrollArea *>("aoControls"));
         QVERIFY(w.findChild<QScrollArea *>("transferControls"));
