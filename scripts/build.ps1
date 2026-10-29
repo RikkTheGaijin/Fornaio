@@ -17,8 +17,18 @@ if ($LASTEXITCODE) { throw 'CMake configure failed.' }
 # Fornaio doesn't use vcpkg; opt out of the machine-wide MSBuild integration.
 & $cmake --build build --config Release --parallel 8 -- /p:VCPkgLocalAppDataDisabled=true
 if ($LASTEXITCODE) { throw 'Build failed.' }
-& "$qt\bin\windeployqt.exe" --release --no-translations --no-system-d3d-compiler --no-opengl-sw --no-compiler-runtime build\Release\Fornaio.exe
-if ($LASTEXITCODE) { throw 'Qt deployment failed.' }
+# Qt can emit non-fatal diagnostics on stderr. On Windows PowerShell those must
+# not bypass the actual process exit-code check under ErrorActionPreference=Stop.
+$deployPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    $deployMessages = & "$qt\bin\windeployqt.exe" --release --no-translations --no-system-d3d-compiler --no-opengl-sw --no-compiler-runtime build\Release\Fornaio.exe 2>&1
+    $deployExit = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $deployPreference
+}
+$deployMessages | ForEach-Object { Write-Host $_ }
+if ($deployExit) { throw 'Qt deployment failed.' }
 Copy-Item -LiteralPath "$qt\bin\Qt6Test.dll" -Destination build\Release -Force
 # The optional private Python engine also needs the app-local MSVC runtime on clean Windows.
 $redist = Get-ChildItem -LiteralPath (Join-Path $vsRoot 'VC\Redist\MSVC') -Directory | Where-Object Name -Match '^14\.' | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1

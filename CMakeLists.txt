@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(Fornaio VERSION 1.3.0 LANGUAGES C CXX)
+project(Fornaio VERSION 1.3.1 LANGUAGES C CXX)
 add_compile_definitions(FORNAIO_VERSION="${PROJECT_VERSION}")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_AUTOMOC ON)
@@ -32,7 +32,7 @@ add_custom_command(OUTPUT ${TRANSFER_PTX}
  DEPENDS src/transfer_kernel.cu src/transfer_shared.h src/shared.h VERBATIM)
 add_custom_target(device_code ALL DEPENDS ${PTX} ${TRANSFER_PTX})
 set(UI_SOURCES src/window.cpp src/viewport.cpp src/transfer_panel.cpp src/transfer_viewport.cpp
- src/ai_texture.cpp src/ai_runtime.cpp src/ai_cloud.cpp src/ai_panel.cpp src/resources/fornaio.qrc)
+ src/ai_texture.cpp src/ai_projection.cpp src/ai_layers.cpp src/ai_runtime.cpp src/ai_cloud.cpp src/ai_panel.cpp src/resources/fornaio.qrc)
 add_executable(Fornaio WIN32 src/main.cpp ${UI_SOURCES} src/resources/fornaio.rc)
 target_link_libraries(Fornaio PRIVATE baker Qt6::Widgets Qt6::Network Qt6::OpenGLWidgets Qt6::OpenGL)
 add_executable(fornaio_cli src/cli.cpp src/transfer_tests.cpp src/uv2_tests.cpp src/resources/fornaio.rc)
@@ -42,13 +42,18 @@ add_test(NAME core_and_gpu COMMAND fornaio_cli --self-test)
 add_executable(fornaio_ui_tests tests/ui_tests.cpp ${UI_SOURCES})
 target_link_libraries(fornaio_ui_tests PRIVATE baker Qt6::Widgets Qt6::Network Qt6::OpenGLWidgets Qt6::OpenGL Qt6::Test)
 add_test(NAME ui_regressions COMMAND fornaio_ui_tests)
-add_executable(fornaio_ai_tests tests/ai_tests.cpp src/ai_texture.cpp src/ai_runtime.cpp src/ai_cloud.cpp src/ai_panel.cpp
+add_executable(fornaio_ai_tests tests/ai_tests.cpp src/ai_texture.cpp src/ai_projection.cpp src/ai_layers.cpp src/ai_runtime.cpp src/ai_cloud.cpp src/ai_panel.cpp
  src/transfer_viewport.cpp)
 target_link_libraries(fornaio_ai_tests PRIVATE baker Qt6::Widgets Qt6::Network Qt6::OpenGLWidgets Qt6::OpenGL Qt6::Test)
 add_test(NAME ai_regressions COMMAND fornaio_ai_tests)
+add_executable(fornaio_projection_tests tests/projection_tests.cpp src/ai_texture.cpp src/ai_projection.cpp
+ src/ai_layers.cpp src/transfer_viewport.cpp)
+target_link_libraries(fornaio_projection_tests PRIVATE baker Qt6::Widgets Qt6::OpenGLWidgets Qt6::OpenGL Qt6::Test)
+add_test(NAME projection_parity COMMAND fornaio_projection_tests)
+set_tests_properties(projection_parity PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 # Maintainer tool for scripted end-to-end generator evaluation (capture, project, render).
-add_executable(fornaio_ai_eval tests/ai_eval.cpp src/ai_texture.cpp)
-target_link_libraries(fornaio_ai_eval PRIVATE baker Qt6::OpenGLWidgets)
+add_executable(fornaio_ai_eval tests/ai_eval.cpp src/ai_texture.cpp src/ai_projection.cpp src/ai_layers.cpp)
+target_link_libraries(fornaio_ai_eval PRIVATE baker Qt6::OpenGLWidgets Qt6::OpenGL)
 set_tests_properties(ai_regressions PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 foreach(t Fornaio fornaio_cli fornaio_ui_tests)
  add_dependencies(${t} device_code)

@@ -1,0 +1,2103 @@
+{
+  "format": "FornaioWebGLProjectionReference",
+  "version": 1,
+  "reference": {
+    "url": "https://app.modddif.com/assets/main-BZiTw8uP.js",
+    "sha256": "f5826dcf78e6215d72841cbcca0a47e8afa9d6768a70f55d321249477615b9f2",
+    "observed": "2026-10-29"
+  },
+  "environment": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.0.0 Safari/537.36",
+    "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 4090 (0x00002684) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "version": "WebGL 2.0 (OpenGL ES 3.0 Chromium)"
+  },
+  "tolerance": {
+    "rgba8": 1,
+    "float32": 0.000001
+  },
+  "cases": [
+    {
+      "name": "orthographic_0",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        255
+      ]
+    },
+    {
+      "name": "orthographic_30",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0.49999999999999994,
+          0,
+          0.8660254037844387
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        191
+      ]
+    },
+    {
+      "name": "orthographic_60",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0.8660254037844386,
+          0,
+          0.5000000000000001
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        64
+      ]
+    },
+    {
+      "name": "orthographic_70",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0.9396926207859083,
+          0,
+          0.3420201433256688
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        30
+      ]
+    },
+    {
+      "name": "orthographic_80",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0.984807753012208,
+          0,
+          0.17364817766693041
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        8
+      ]
+    },
+    {
+      "name": "orthographic_86",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0.9975640502598242,
+          0,
+          0.06975647374412546
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        1
+      ]
+    },
+    {
+      "name": "orthographic_89",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0.9998476951563913,
+          0,
+          0.017452406437283376
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        0
+      ]
+    },
+    {
+      "name": "cosine_below_cutoff",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0.9999594991798418,
+          0,
+          0.009
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "cosine_above_cutoff_quantizes_to_zero",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0.9999394981697642,
+          0,
+          0.011
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        0
+      ]
+    },
+    {
+      "name": "overlay_bypasses_similarity",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          1,
+          0,
+          0
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": true
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        255
+      ]
+    },
+    {
+      "name": "interpolated_normal_not_renormalized",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0.5,
+          0,
+          0.5
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        64
+      ]
+    },
+    {
+      "name": "perspective_distance_falloff",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 4,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": false,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        64
+      ]
+    },
+    {
+      "name": "camera_and_uv_mask",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 0.5,
+        "uvMask": 0.25,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        32
+      ]
+    },
+    {
+      "name": "excluded_camera_mask",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 0.009,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "excluded_uv_mask",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 0.009,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "depth_in_front_accepted",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.49995,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        255
+      ]
+    },
+    {
+      "name": "depth_too_far_in_front_rejected",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.4998,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "depth_behind_rejected",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.50004,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "depth_bias_orthographic",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.50001,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        255
+      ]
+    },
+    {
+      "name": "depth_bias_perspective",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.50001,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": false,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "depth_continuous_neighborhood",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 1,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        255
+      ]
+    },
+    {
+      "name": "depth_discontinuity_rejected",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 1,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "depth_discontinuity_disabled",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        80,
+        30,
+        255
+      ]
+    },
+    {
+      "name": "depth_discontinuity_neighbor_-1_-1",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 1,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "depth_discontinuity_neighbor_0_-1",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 1,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "depth_discontinuity_neighbor_1_-1",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 1,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "depth_discontinuity_neighbor_-1_0",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 1,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "depth_discontinuity_neighbor_1_0",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 1,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "depth_discontinuity_neighbor_-1_1",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 1,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "depth_discontinuity_neighbor_0_1",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 1,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "depth_discontinuity_neighbor_1_1",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 1,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "premultiplied_bilinear_edge",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        200,
+        0,
+        0,
+        127
+      ]
+    },
+    {
+      "name": "fractional_source_alpha",
+      "kind": "projection",
+      "settings": {
+        "normal": [
+          0,
+          0,
+          1
+        ],
+        "sourceUv": [
+          0.5,
+          0.5
+        ],
+        "clipW": 1,
+        "fragmentDepth": 0.5,
+        "cameraMask": 1,
+        "uvMask": 1,
+        "depthMargin": 0,
+        "orthographic": true,
+        "overlay": false
+      },
+      "rgba": [
+        199,
+        80,
+        30,
+        128
+      ]
+    },
+    {
+      "name": "square_erosion_radius_2",
+      "kind": "erosion",
+      "width": 9,
+      "height": 9,
+      "inputAlpha": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "alpha": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "uv_padding_outside_islands_only",
+      "kind": "padding",
+      "width": 13,
+      "height": 13,
+      "inputIsland": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "inputAlpha": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        0,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "alpha": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        255,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "encoded_rgb_black_white_average",
+      "kind": "composition",
+      "layers": [
+        [
+          0,
+          0,
+          0,
+          1
+        ],
+        [
+          1,
+          1,
+          1,
+          1
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "strengths": [
+        1,
+        1,
+        1
+      ],
+      "modes": [
+        0,
+        0,
+        0
+      ],
+      "accumulator": [
+        1,
+        1,
+        1,
+        2
+      ],
+      "normalizedFloat": [
+        0.5,
+        0.5,
+        0.5,
+        1
+      ],
+      "rgba": [
+        127,
+        127,
+        127,
+        255
+      ]
+    },
+    {
+      "name": "unequal_blend_weights",
+      "kind": "composition",
+      "layers": [
+        [
+          1,
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1,
+          0.25
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "strengths": [
+        1,
+        1,
+        1
+      ],
+      "modes": [
+        0,
+        0,
+        0
+      ],
+      "accumulator": [
+        1,
+        0,
+        0.25,
+        1.25
+      ],
+      "normalizedFloat": [
+        0.800000011920929,
+        0,
+        0.20000000298023224,
+        1
+      ],
+      "rgba": [
+        204,
+        0,
+        51,
+        255
+      ]
+    },
+    {
+      "name": "blend_order_reversed",
+      "kind": "composition",
+      "layers": [
+        [
+          0,
+          0,
+          1,
+          0.25
+        ],
+        [
+          1,
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "strengths": [
+        1,
+        1,
+        1
+      ],
+      "modes": [
+        0,
+        0,
+        0
+      ],
+      "accumulator": [
+        1,
+        0,
+        0.25,
+        1.25
+      ],
+      "normalizedFloat": [
+        0.800000011920929,
+        0,
+        0.20000000298023224,
+        1
+      ],
+      "rgba": [
+        204,
+        0,
+        51,
+        255
+      ]
+    },
+    {
+      "name": "mixed_blend_overlay",
+      "kind": "composition",
+      "layers": [
+        [
+          1,
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          1,
+          0,
+          0.5
+        ],
+        [
+          0,
+          0,
+          1,
+          0.25
+        ]
+      ],
+      "strengths": [
+        1,
+        1,
+        1
+      ],
+      "modes": [
+        0,
+        1,
+        0
+      ],
+      "accumulator": [
+        0.5,
+        0.5,
+        0.25,
+        1.25
+      ],
+      "normalizedFloat": [
+        0.4000000059604645,
+        0.4000000059604645,
+        0.20000000298023224,
+        1
+      ],
+      "rgba": [
+        102,
+        102,
+        51,
+        255
+      ]
+    },
+    {
+      "name": "blend_strength_above_one",
+      "kind": "composition",
+      "layers": [
+        [
+          1,
+          0,
+          0,
+          0.25
+        ],
+        [
+          0,
+          0,
+          1,
+          0.5
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "strengths": [
+        2,
+        1,
+        1
+      ],
+      "modes": [
+        0,
+        0,
+        0
+      ],
+      "accumulator": [
+        0.5,
+        0,
+        0.5,
+        1
+      ],
+      "normalizedFloat": [
+        0.5,
+        0,
+        0.5,
+        0.5
+      ],
+      "rgba": [
+        127,
+        0,
+        127,
+        127
+      ]
+    },
+    {
+      "name": "overlay_strength_clamped",
+      "kind": "composition",
+      "layers": [
+        [
+          1,
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          1,
+          0.5
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "strengths": [
+        1,
+        2,
+        1
+      ],
+      "modes": [
+        0,
+        1,
+        0
+      ],
+      "accumulator": [
+        0.5,
+        0,
+        0.5,
+        1
+      ],
+      "normalizedFloat": [
+        0.5,
+        0,
+        0.5,
+        1
+      ],
+      "rgba": [
+        127,
+        0,
+        127,
+        255
+      ]
+    },
+    {
+      "name": "zero_strength_empty",
+      "kind": "composition",
+      "layers": [
+        [
+          1,
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "strengths": [
+        0,
+        1,
+        1
+      ],
+      "modes": [
+        0,
+        0,
+        0
+      ],
+      "accumulator": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "normalizedFloat": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "rgba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "blend_max_coverage_not_sum",
+      "kind": "composition",
+      "layers": [
+        [
+          1,
+          0,
+          0,
+          0.25
+        ],
+        [
+          0,
+          1,
+          0,
+          0.25
+        ],
+        [
+          0,
+          0,
+          1,
+          0.25
+        ]
+      ],
+      "strengths": [
+        1,
+        1,
+        1
+      ],
+      "modes": [
+        0,
+        0,
+        0
+      ],
+      "accumulator": [
+        0.25,
+        0.25,
+        0.25,
+        0.75
+      ],
+      "normalizedFloat": [
+        0.3333333432674408,
+        0.3333333432674408,
+        0.3333333432674408,
+        0.25
+      ],
+      "rgba": [
+        85,
+        85,
+        85,
+        64
+      ]
+    },
+    {
+      "name": "blend_max_coverage_above_one",
+      "kind": "composition",
+      "layers": [
+        [
+          1,
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "strengths": [
+        2,
+        1,
+        1
+      ],
+      "modes": [
+        0,
+        0,
+        0
+      ],
+      "accumulator": [
+        2,
+        0,
+        0,
+        2
+      ],
+      "normalizedFloat": [
+        1,
+        0,
+        0,
+        2
+      ],
+      "rgba": [
+        255,
+        0,
+        0,
+        255
+      ]
+    }
+  ]
+}

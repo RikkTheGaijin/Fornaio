@@ -679,3 +679,54 @@ All 59 native AI tests pass (one real GPT Image 2 generation is opt-in and passe
 9 UI tests, 14 worker tests and 2 inference tests. The optional Fibo manifest
 (`briaai/Fibo-2.0-edit-turbo`, revision b8dd54e5, 67 files, 28.41 GB) was resolved
 with a Hugging Face token; its download was not re-run after the manifest change.
+
+### Projection-layer parity in 1.3.1 (October 29, 2026)
+
+The projection implementation now follows the public Modddif client snapshot
+identified in `ai/PROJECTION_BLENDING.md`: offscreen OpenGL 3.3 projection into
+independent RGBA8 images, followed by source-value Float32 accumulation and maximum
+coverage. Source images are preserved separately from editable masks. The legacy
+CPU compositor remains available for existing projects until explicit rebuild.
+
+`tests/projection_reference.html` ran 44 deterministic WebGL2 cases in Chrome 156
+with ANGLE D3D11 on the RTX 4090. Its observed readbacks are checked in as
+`tests/projection_reference_golden.json`. Native projection regressions compare
+angle and composition outputs with those values (one RGBA8 level tolerance), and
+exercise interpolated normals, premultiplied transparent edges, silhouette erosion,
+depth-discontinuity margins, hidden surfaces, UV seams/padding, separate source and
+mask resolutions, cancellation, project round trips, and atlases through 4096.
+These establish the tested client-stage behavior, not cross-driver bitwise identity
+or parity with Modddif's private generation service.
+
+The exact supplied `head_test4.fornaioai` was replayed without inference. All eleven
+layers were rebuilt, preserving the original first four visible and seven hidden
+layers. The 2048 atlas has 3,464,478 texels with nonzero valid paint; maximum weight
+is below 0.05 on 11,110 of those. Replay plus six inspection renders, individual
+hidden-layer renders, atlas exports, and saving a separate rebuilt project took
+16.65 seconds. Crown and shoulder views were visually inspected: the prominent
+rectangular scalp smear and jagged shoulder bands disappear. Small eye, nostril,
+ear and neck gaps remain. The old project contains processed candidates and combined
+ownership masks, without recoverable raw generations, and has no visible top view;
+reprojection cannot reconstruct information already removed from those inputs.
+
+The original project remains 249,621,231 bytes with SHA-256
+`231ebd0001316243bf5b73dc6a070e559c2ad6b64228d39a4ac2dc1f6bdae983`.
+The mesh fingerprint remains
+`831801990a8cec6df77ec51d5329c61d7a62b7b6182506e2afe2abc2ddd8cf34`.
+Private replay outputs are in the ignored `.ai-qa/modddif-parity/head_test4/`
+directory and are excluded from distribution.
+
+Native tests cover deletion of visible, hidden, isolated and final layers; full
+undo/redo; restored base paint; edits without inference; original source alpha;
+legacy freezing before deletion; explicit rebuild and its cancellation/error
+atomicity. The local worker also verifies raw source preservation before its legacy
+detail-restoration step. No paid generation or model download was performed.
+
+The projection suite passes 14 test phases, the AI suite 63 phases with one paid
+smoke test skipped, the worker suite 15 tests, and the UI suite 9 phases.
+Core/OptiX, Texture Transfer and UV2 self-tests pass with native GPU
+access. The paid GPT smoke test remains opt-in. Optional PyTorch inference tests
+were not rerun: the maintainer Python used here has no PyTorch installation, and
+the inference kernels were unchanged. Graphify is refreshed from the new code;
+its C++ extractor warns about Qt test macros and may only partially index those
+test files despite successful native compilation.

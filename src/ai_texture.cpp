@@ -1,4 +1,5 @@
 #include "ai_texture.h"
+#include "ai_layers.h"
 #include <QBuffer>
 #include <QCryptographicHash>
 #include <QDataStream>
@@ -1479,13 +1480,24 @@ AiCamera aiCameraFromJson(const QJsonObject &j) {
 }
 QJsonArray aiSerializeAtlases(const AiAtlases &atlases) {
     QJsonArray images;
-    for (auto it = atlases.begin(); it != atlases.end(); ++it)
-        images.append(QJsonObject{
+    for (auto it = atlases.begin(); it != atlases.end(); ++it) {
+        QJsonObject image{
             {"material", it.key()},
             {"color", QString::fromLatin1(png(it->color))},
             {"coverage", QString::fromLatin1(png(it->coverage))},
             {"confidence",
-             it->confidence.isNull() ? QJsonValue() : QJsonValue(QString::fromLatin1(png(it->confidence)))}});
+             it->confidence.isNull() ? QJsonValue() : QJsonValue(QString::fromLatin1(png(it->confidence)))}};
+        if (!it->projectionWeight.empty()) {
+            QByteArray weights;
+            QDataStream stream(&weights, QIODevice::WriteOnly);
+            stream.setByteOrder(QDataStream::LittleEndian);
+            stream.setFloatingPointPrecision(QDataStream::SinglePrecision);
+            for (float value : it->projectionWeight)
+                stream << value;
+            image["projectionWeight"] = QString::fromLatin1(qCompress(weights).toBase64());
+        }
+        images.append(image);
+    }
     return images;
 }
 AiAtlases aiDeserializeAtlases(const QJsonArray &images) {
@@ -1499,12 +1511,34 @@ AiAtlases aiDeserializeAtlases(const QJsonArray &images) {
         if (a.color.size() != a.coverage.size() || a.color.width() != a.color.height() ||
             a.color.width() > 4096 || (!a.confidence.isNull() && a.confidence.size() != a.color.size()))
             fail("Invalid atlas size");
+        if (j["projectionWeight"].isString()) {
+            const QByteArray packed = QByteArray::fromBase64(j["projectionWeight"].toString().toLatin1());
+            const quint64 expected = quint64(a.color.width()) * a.color.height() * sizeof(float);
+            if (packed.size() < 4 || qFromBigEndian<quint32>(packed.constData()) != expected)
+                fail("Invalid projection coverage size");
+            const QByteArray weights = qUncompress(packed);
+            if (quint64(weights.size()) != expected)
+                fail("Invalid projection coverage");
+            QDataStream stream(weights);
+            stream.setByteOrder(QDataStream::LittleEndian);
+            stream.setFloatingPointPrecision(QDataStream::SinglePrecision);
+            a.projectionWeight.resize(a.color.width() * a.color.height());
+            for (float &weight : a.projectionWeight) {
+                stream >> weight;
+                if (!std::isfinite(weight) || weight < 0 || weight > 2)
+                    fail("Invalid projection coverage weight");
+            }
+        }
         loaded[j["material"].toString()] = a;
     }
     return loaded;
 }
 AiAtlases aiComposeLayers(const AiAtlases &base, const QList<QJsonObject> &records, std::atomic_bool *cancel,
                           QCache<QByteArray, QByteArray> *decoded) {
+    if (std::any_of(records.begin(), records.end(), [](const QJsonObject &r) {
+            return r["uvLayer"].toObject()["version"].toInt() == 2;
+        }))
+        return aiComposeParityLayers(base, records, cancel);
     AiAtlases result = base;
     QMap<QString, int> padding;
     QSet<QString> touched;
@@ -1603,6 +1637,10 @@ QList<QJsonObject> aiPrepareLayers(const Scene &scene, int uv, const AiAtlases &
     QList<QJsonObject> result;
     for (auto record : records) {
         checkCancel(cancel);
+        if (record["uvLayer"].toObject()["version"].toInt() == 2) {
+            result << record;
+            continue;
+        }
         if (record["uvLayer"].toObject()["version"].toInt() != 1) {
             auto capture =
                 aiCapture(scene, uv, composite, aiCameraFromJson(record["camera"].toObject()), cancel);
@@ -1644,7 +1682,7 @@ void aiSaveProject(const QString &path, const QJsonObject &settings, const AiAtl
     for (const auto &p : projections)
         history.append(p);
     QJsonObject root{{"format", "FornaioAI"},
-                     {"version", 1},
+                     {"version", settings["projectionBackend"] == "modddif-v1" ? 2 : 1},
                      {"settings", settings},
                      {"atlases", images},
                      {"projections", history}};
@@ -1662,7 +1700,8 @@ QJsonObject aiLoadProject(const QString &path, AiAtlases &atlases, QList<QJsonOb
     QJsonParseError error;
     auto doc = QJsonDocument::fromJson(f.readAll(), &error);
     auto root = doc.object();
-    if (error.error != QJsonParseError::NoError || root["format"] != "FornaioAI" || root["version"] != 1)
+    if (error.error != QJsonParseError::NoError || root["format"] != "FornaioAI" ||
+        (root["version"] != 1 && root["version"] != 2))
         fail("Unsupported AI project");
     AiAtlases loaded;
     QList<QJsonObject> history;

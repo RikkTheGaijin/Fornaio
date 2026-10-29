@@ -1,9 +1,11 @@
 #include "window.h"
+#include "ai_projection.h"
 #include <QApplication>
 #include <QIcon>
 #include <QSettings>
 #include <QSurfaceFormat>
 #include <QTimer>
+#include <QScopeGuard>
 int main(int argc, char **argv) {
     QSurfaceFormat fmt;
     fmt.setVersion(3, 3);
@@ -12,6 +14,7 @@ int main(int argc, char **argv) {
     fmt.setSamples(4);
     QSurfaceFormat::setDefaultFormat(fmt);
     QApplication app(argc, argv);
+    const auto projectionCleanup = qScopeGuard([] { aiShutdownProjectionRenderer(); });
     app.setOrganizationName("Fornaio");
     app.setApplicationName("Fornaio");
     app.setApplicationVersion(FORNAIO_VERSION);

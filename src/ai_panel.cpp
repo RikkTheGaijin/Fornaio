@@ -1,4 +1,5 @@
 #include "ai_panel.h"
+#include "ai_layers.h"
 #include "scroll_controls.h"
 #include "transfer.h"
 #include <QApplication>
@@ -8,6 +9,8 @@
 #include <QCryptographicHash>
 #include <QDesktopServices>
 #include <QDir>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -35,10 +38,12 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QSplitter>
+#include <QStandardItemModel>
 #include <QStyledItemDelegate>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QVBoxLayout>
+#include <QUuid>
 #include <algorithm>
 
 namespace {
@@ -95,6 +100,26 @@ QString imageData(const QImage &im) {
     buffer.open(QIODevice::WriteOnly);
     im.save(&buffer, "PNG");
     return QString::fromLatin1(bytes.toBase64());
+}
+QByteArray compositionKey(const AiAtlases &base, const QList<QJsonObject> &records,
+                          bool parity, const QString &isolation) {
+    QByteArray key = parity ? "parity:" : "legacy:";
+    key += isolation.toUtf8();
+    for (auto it = base.begin(); it != base.end(); ++it)
+        key += ':' + it.key().toUtf8() + ':' + QByteArray::number(it->color.cacheKey()) + ':' +
+               QByteArray::number(it->coverage.cacheKey()) + ':' + QByteArray::number(it->confidence.cacheKey());
+    for (const auto &record : records)
+        key += ':' + record["layerId"].toString().toUtf8() +
+               (record["visible"].toBool(true) ? "+" : "-") +
+               QJsonDocument(record["blending"].toObject()).toJson(QJsonDocument::Compact);
+    return QCryptographicHash::hash(key, QCryptographicHash::Sha256);
+}
+int compositionCost(const AiAtlases &atlases) {
+    qint64 bytes = 0;
+    for (const auto &atlas : atlases)
+        bytes += atlas.color.sizeInBytes() + atlas.coverage.sizeInBytes() +
+                 atlas.confidence.sizeInBytes() + atlas.projectionWeight.size() * sizeof(float);
+    return int((bytes + 1023) / 1024);
 }
 void atomicImage(const QImage &im, const QString &path) {
     QSaveFile file(path);
@@ -216,6 +241,11 @@ class AiMaskCanvas : public QWidget {
 };
 
 AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(this), cloud_(this) {
+    try {
+        aiInitializeProjectionRenderer();
+    } catch (const std::exception &error) {
+        projectionError_ = QString::fromUtf8(error.what());
+    }
     setObjectName("aiTexturingPanel");
     QSettings settings;
     installer_.setRoot(settings.value("ai/location", AiInstaller::defaultRoot()).toString());
@@ -562,6 +592,7 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     blendMode_->addItem("Camera projection (repaint)", "overlay");
     blendMode_->addItem("Blend by camera quality", "blend");
     blendMode_->addItem("Fill uncovered only", "fill");
+    blendMode_->setCurrentIndex(blendMode_->findData("blend"));
     blendMode_->setToolTip(
         "Keep existing paint: paint an earlier view saw well is locked, and this view only paints around it "
         "(uncovered or grazing areas). Camera projection paints over existing texture with soft camera falloff. "
@@ -639,26 +670,16 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     connect(undoButton_, &QPushButton::clicked, this, [this] {
         if (undo_.empty() || busy_)
             return;
-        redo_ << HistoryState{atlases_, projections_};
+        redo_ << historyState();
         const auto state = undo_.takeLast();
-        atlases_ = state.atlases;
-        projections_ = state.projections;
-        ++revision_;
-        updatePreview();
-        refreshLayers();
-        refresh();
+        restoreHistory(state);
     });
     connect(redoButton_, &QPushButton::clicked, this, [this] {
         if (redo_.empty() || busy_)
             return;
-        undo_ << HistoryState{atlases_, projections_};
+        undo_ << historyState();
         const auto state = redo_.takeLast();
-        atlases_ = state.atlases;
-        projections_ = state.projections;
-        ++revision_;
-        updatePreview();
-        refreshLayers();
-        refresh();
+        restoreHistory(state);
     });
     button(inputLayout, "Save texturing project…", [this] { saveProject(); });
     button(inputLayout, "Open texturing project…", [this] { openProject(); });
@@ -792,8 +813,92 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     layers_->setItemDelegate(new ProjectionLayerDelegate(layers_));
     layers_->setIconSize(QSize(64, 64));
     layers_->setSpacing(2);
+    layers_->setMinimumHeight(84);
     layers_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     layerLayout->addWidget(layers_, 1);
+    layerTools_ = new QWidget;
+    auto layerToolsLayout = new QVBoxLayout(layerTools_);
+    layerToolsLayout->setContentsMargins(0, 0, 0, 0);
+    auto layerForm = new QFormLayout;
+    layerMode_ = new ScrollComboBox;
+    layerMode_->setObjectName("aiLayerMode");
+    layerMode_->addItem("Blend", "blend");
+    layerMode_->addItem("Overlay", "overlay");
+    layerStrength_ = new ScrollSpinBox;
+    layerStrength_->setObjectName("aiLayerStrength");
+    layerStrength_->setRange(0, 200);
+    layerStrength_->setSuffix(" %");
+    layerDepthMargin_ = new ScrollSpinBox;
+    layerDepthMargin_->setObjectName("aiLayerDepthMargin");
+    layerDepthMargin_->setRange(0, 20);
+    layerForm->addRow("Mode", layerMode_);
+    layerForm->addRow("Strength", layerStrength_);
+    layerForm->addRow("Depth margin", layerDepthMargin_);
+    layerToolsLayout->addLayout(layerForm);
+    auto applySettings = button(layerToolsLayout, "Apply layer settings", [this] {
+        const int index = selectedLayer();
+        if (index < 0 || !parity_)
+            return;
+        auto records = projections_;
+        auto blend = records[index]["blending"].toObject();
+        const bool rebake = blend["mode"].toString() != layerMode_->currentData().toString() ||
+                            blend["depthMargin"].toInt(2) != layerDepthMargin_->value();
+        blend["mode"] = layerMode_->currentData().toString();
+        blend["strength"] = layerStrength_->value() / 100.;
+        blend["depthMargin"] = layerDepthMargin_->value();
+        records[index]["blending"] = blend;
+        applyLayerEdit(records, rebake ? index : -1, index, "Layer settings updated.", isolatedLayer_);
+    });
+    applySettings->setObjectName("aiApplyLayerSettings");
+    auto moveButtons = new QHBoxLayout;
+    auto moveUp = new QPushButton("Move up");
+    auto moveDown = new QPushButton("Move down");
+    moveUp->setObjectName("aiLayerMoveUp");
+    moveDown->setObjectName("aiLayerMoveDown");
+    moveButtons->addWidget(moveUp);
+    moveButtons->addWidget(moveDown);
+    layerToolsLayout->addLayout(moveButtons);
+    connect(moveUp, &QPushButton::clicked, this, [this] { moveLayer(selectedLayer(), 1); });
+    connect(moveDown, &QPushButton::clicked, this, [this] { moveLayer(selectedLayer(), -1); });
+    layerIsolate_ = new QCheckBox("Isolate selected layer");
+    layerIsolate_->setObjectName("aiLayerIsolate");
+    layerToolsLayout->addWidget(layerIsolate_);
+    connect(layerIsolate_, &QCheckBox::toggled, this, [this](bool on) {
+        const int index = selectedLayer();
+        if (index >= 0)
+            applyLayerEdit(projections_, -1, index, on ? "Layer isolated." : "Layer isolation cleared.",
+                           on ? projections_[index]["layerId"].toString() : QString());
+    });
+    auto maskButtons = new QHBoxLayout;
+    auto cameraMask = new QPushButton("Camera mask");
+    auto uvMask = new QPushButton("UV mask");
+    maskButtons->addWidget(cameraMask);
+    maskButtons->addWidget(uvMask);
+    layerToolsLayout->addLayout(maskButtons);
+    connect(cameraMask, &QPushButton::clicked, this, [this] { editLayerMask(selectedLayer(), false); });
+    connect(uvMask, &QPushButton::clicked, this, [this] { editLayerMask(selectedLayer(), true); });
+    button(layerToolsLayout, "Replace image...", [this] { replaceLayerImage(selectedLayer()); });
+    button(layerToolsLayout, "Go to captured camera", [this] {
+        const int index = selectedLayer();
+        if (index >= 0)
+            view_->setCamera(aiCameraFromJson(projections_[index]["camera"].toObject()).orbit);
+    });
+    auto layerToolScroll = new QScrollArea;
+    layerToolScroll->setObjectName("aiLayerControlsScroll");
+    layerToolScroll->setWidgetResizable(true);
+    layerToolScroll->setFrameShape(QFrame::NoFrame);
+    layerToolScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    layerToolScroll->setSizeAdjustPolicy(QAbstractScrollArea::AdjustToContents);
+    layerToolScroll->setMinimumHeight(180);
+    layerToolScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    layerToolScroll->setWidget(layerTools_);
+    layerLayout->addWidget(layerToolScroll);
+    deleteLayer_ = button(layerLayout, "Delete layer", [this] { deleteLayer(selectedLayer()); });
+    deleteLayer_->setObjectName("aiDeleteLayer");
+    rebuildLayers_ = button(layerLayout, "Rebuild projection layers", [this] { rebuildProjectionLayers(); });
+    rebuildLayers_->setObjectName("aiRebuildLayers");
+    rebuildLayers_->setToolTip("Rebuild every saved view using the corrected projection pipeline. No AI generation. Undo restores the previous stack.");
+    connect(layers_, &QListWidget::currentRowChanged, this, [this] { refreshLayerTools(); });
     split->addWidget(layersPanel);
     split->setSizes({350, 700, 240});
     connect(layers_, &QListWidget::itemChanged, this, [this](QListWidgetItem *item) {
@@ -809,11 +914,15 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
         auto look = menu.addAction("Go to this layer's camera");
         auto regenerate = menu.addAction("Regenerate with a new seed");
         regenerate->setEnabled(modelReady() && !externalBusy_);
+        auto remove = menu.addAction("Delete layer");
+        remove->setEnabled(!externalBusy_);
         auto chosen = menu.exec(layers_->viewport()->mapToGlobal(point));
         if (chosen == look)
             view_->setCamera(aiCameraFromJson(projections_[index]["camera"].toObject()).orbit);
         else if (chosen == regenerate)
             regenerateLayer(index);
+        else if (chosen == remove)
+            deleteLayer(index);
     });
     auto bar = new QHBoxLayout;
     layout->addLayout(bar);
@@ -895,6 +1004,9 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     hardware_ = aiHardware();
     profile_->setCurrentIndex(hardware_.profile() == "memory" ? 1 : 0);
     refresh();
+    if (!projectionError_.isEmpty())
+        status_->setText("Projection renderer unavailable: " + projectionError_ +
+                         ". Saved paint can still be inspected and exported.");
 }
 AiPanel::~AiPanel() {
     shutdown();
@@ -955,6 +1067,7 @@ void AiPanel::refresh() {
     redoButton_->setEnabled(idle && !redo_.empty());
     export_->setEnabled(idle && !projections_.empty() && !selectedMaterials().empty());
     cancelButton_->setEnabled(busy_ || installer_.busy());
+    refreshLayerTools();
 }
 QSet<QString> AiPanel::selectedMaterials() const {
     QSet<QString> set;
@@ -983,6 +1096,9 @@ void AiPanel::resetAtlases() {
     if (!scene_)
         return;
     try {
+        parity_ = true;
+        isolatedLayer_.clear();
+        blendMode_->setCurrentIndex(blendMode_->findData("blend"));
         layerFrames_.clear();
         layerDecoded_.clear();
         meshErrors_ = validateAiMesh(*scene_, uv_->currentIndex());
@@ -1100,116 +1216,241 @@ void AiPanel::updatePreview() {
 }
 void AiPanel::refreshLayers() {
     const QSignalBlocker blocker(layers_);
-    if (layers_->count() == projections_.size()) {
-        for (int row = 0; row < layers_->count(); ++row) {
-            const int index = layers_->item(row)->data(Qt::UserRole).toInt();
-            const bool visible = projections_[index]["visible"].toBool(true);
-            layers_->item(row)->setCheckState(visible ? Qt::Checked : Qt::Unchecked);
-            layers_->item(row)->setForeground(QColor(visible ? "#d9e7ef" : "#7e909e"));
-        }
-        layersEmpty_->setVisible(projections_.empty());
-        return;
+    const int selected = selectedLayer();
+    QSet<QString> identities;
+    for (auto &record : projections_) {
+        if (record["layerId"].toString().isEmpty() || identities.contains(record["layerId"].toString()))
+            record["layerId"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        identities.insert(record["layerId"].toString());
     }
-    layers_->clear();
-    layersEmpty_->setVisible(projections_.empty());
     int frontLayer = -1; // The first visible layer is the front for view-aware generation.
     for (int j = 0; j < projections_.size() && frontLayer < 0; ++j)
         if (projections_[j]["visible"].toBool(true))
             frontLayer = j;
+    auto title = [frontLayer](int index, const QJsonObject &record) {
+        const auto camera = record["camera"].toObject();
+        return QString("Projection %1\n%2° yaw · %3° pitch")
+                   .arg(index + 1)
+                   .arg(camera["yaw"].toDouble(), 0, 'f', 0)
+                   .arg(camera["pitch"].toDouble(), 0, 'f', 0) +
+               (index == frontLayer ? "  [front]" : "");
+    };
+    bool sameItems = layers_->count() == projections_.size();
+    for (int row = 0; sameItems && row < layers_->count(); ++row) {
+        const auto &record = projections_[projections_.size() - 1 - row];
+        sameItems = layers_->item(row)->data(Qt::UserRole + 1).toString() == record["layerId"].toString() &&
+                    layers_->item(row)->data(Qt::UserRole + 2).toString() == record["candidate"].toString();
+    }
+    if (sameItems) {
+        for (int row = 0; row < layers_->count(); ++row) {
+            auto item = layers_->item(row);
+            const int index = projections_.size() - 1 - row;
+            const bool visible = projections_[index]["visible"].toBool(true);
+            item->setCheckState(visible ? Qt::Checked : Qt::Unchecked);
+            item->setForeground(QColor(visible ? "#d9e7ef" : "#7e909e"));
+            item->setText(title(index, projections_[index]));
+        }
+        layersEmpty_->setVisible(projections_.empty());
+        refreshLayerTools();
+        return;
+    }
+    layers_->clear();
+    layersEmpty_->setVisible(projections_.empty());
     for (int i = projections_.size() - 1; i >= 0; --i) {
-        const auto &record = projections_[i];
+        auto &record = projections_[i];
         QImage thumbnail =
             QImage::fromData(QByteArray::fromBase64(record["candidate"].toString().toLatin1()), "PNG");
         if (!thumbnail.isNull())
             thumbnail = thumbnail.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        const auto camera = record["camera"].toObject();
         auto item = new QListWidgetItem(QIcon(QPixmap::fromImage(thumbnail)),
-                                        QString("Projection %1\n%2° yaw · %3° pitch")
-                                            .arg(i + 1)
-                                            .arg(camera["yaw"].toDouble(), 0, 'f', 0)
-                                            .arg(camera["pitch"].toDouble(), 0, 'f', 0) +
-                                            (i == frontLayer ? "  [front]" : ""),
+                                        title(i, record),
                                         layers_);
         item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable);
         item->setData(Qt::UserRole, i);
+        item->setData(Qt::UserRole + 1, record["layerId"].toString());
+        item->setData(Qt::UserRole + 2, record["candidate"].toString());
         item->setCheckState(record["visible"].toBool(true) ? Qt::Checked : Qt::Unchecked);
         item->setSizeHint(QSize(200, 76));
         item->setToolTip("Toggle visibility in the composed texture. Newest projection is at the top. Right-click to "
-                         "regenerate it or look through its camera. The first visible layer is the front.\n" +
+                         "regenerate, delete, or look through its camera. The first visible layer is the front.\n" +
                          record["prompt"].toString());
         if (!record["visible"].toBool(true))
             item->setForeground(QColor("#7e909e"));
     }
+    if (!projections_.empty())
+        layers_->setCurrentRow(projections_.size() - 1 - std::clamp(selected, 0, int(projections_.size()) - 1));
+    refreshLayerTools();
 }
 void AiPanel::setLayerVisible(int index, bool visible) {
     if (busy_ || externalBusy_ || index < 0 || index >= projections_.size())
         return;
     if (projections_[index]["visible"].toBool(true) == visible)
         return;
-    if (native_.joinable())
-        native_.join();
-    auto scene = scene_;
-    const auto base = layerBase_;
-    const auto records = projections_;
-    auto keyFor = [](const QList<QJsonObject> &list) {
-        QByteArray key;
-        for (const auto &r : list)
-            key += r["visible"].toBool(true) ? '1' : '0';
-        return key;
-    };
-    qint64 cost = 0;
-    for (const auto &a : atlases_)
-        cost += a.color.sizeInBytes() + a.coverage.sizeInBytes() + a.confidence.sizeInBytes();
-    layerFrames_.insert(keyFor(records), new AiAtlases(atlases_), int((cost + 1023) / 1024));
-    auto requested = records;
+    auto requested = projections_;
     requested[index]["visible"] = visible;
-    if (const auto cached = layerFrames_.object(keyFor(requested))) {
-        undo_ << HistoryState{atlases_, projections_};
-        if (undo_.size() > 10)
-            undo_.removeFirst();
-        redo_.clear();
-        atlases_ = *cached;
-        projections_ = requested;
-        ++revision_;
-        updatePreview();
-        refreshLayers();
-        status_->setText("Layer visibility updated.");
+    applyLayerEdit(requested, -1, index, "Layer visibility updated.", isolatedLayer_);
+}
+int AiPanel::selectedLayer() const {
+    auto item = layers_->currentItem();
+    return item ? item->data(Qt::UserRole).toInt() : -1;
+}
+AiPanel::HistoryState AiPanel::historyState() const {
+    return {atlases_, projections_, layerBase_, parity_, isolatedLayer_, selectedLayer(), blendMode_->currentData().toString()};
+}
+void AiPanel::restoreHistory(const HistoryState &state) {
+    atlases_ = state.atlases;
+    projections_ = state.projections;
+    layerBase_ = state.base;
+    parity_ = state.parity;
+    isolatedLayer_ = state.isolatedLayer;
+    if (!state.mode.isEmpty())
+        blendMode_->setCurrentIndex(std::max(0, blendMode_->findData(state.mode)));
+    layerFrames_.clear();
+    layerDecoded_.clear();
+    ++revision_;
+    refreshLayers();
+    if (state.selected >= 0 && state.selected < projections_.size())
+        layers_->setCurrentRow(projections_.size() - 1 - state.selected);
+    updatePreview();
+    refresh();
+}
+void AiPanel::refreshLayerTools() {
+    const int index = selectedLayer();
+    const bool idle = !busy_ && !externalBusy_ && !installer_.busy();
+    layerTools_->setEnabled(idle && index >= 0);
+    deleteLayer_->setEnabled(idle && index >= 0);
+    rebuildLayers_->setEnabled(idle && scene_ && !projections_.empty());
+    layerMode_->setEnabled(parity_);
+    layerStrength_->setEnabled(parity_);
+    layerDepthMargin_->setEnabled(parity_);
+    if (auto apply = findChild<QPushButton *>("aiApplyLayerSettings"))
+        apply->setEnabled(parity_);
+    const QSignalBlocker a(layerMode_), b(layerStrength_), c(layerDepthMargin_), d(layerIsolate_);
+    if (index >= 0) {
+        const auto blend = projections_[index]["blending"].toObject();
+        layerMode_->setCurrentIndex(blend["mode"].toString() == "overlay" ? 1 : 0);
+        layerStrength_->setValue(qRound(blend["strength"].toDouble(1) * 100));
+        layerDepthMargin_->setValue(blend["depthMargin"].toInt(2));
+        layerIsolate_->setChecked(projections_[index]["layerId"].toString() == isolatedLayer_ && !isolatedLayer_.isEmpty());
+    } else
+        layerIsolate_->setChecked(false);
+    for (auto widget : {static_cast<QWidget *>(projectionFeather_), static_cast<QWidget *>(angleFalloff_),
+                        static_cast<QWidget *>(projectionAngle_), static_cast<QWidget *>(fillGaps_),
+                        static_cast<QWidget *>(coverAll_), static_cast<QWidget *>(colorMatch_)})
+        widget->setEnabled(!parity_);
+    blendMode_->setToolTip(parity_ ? "New projection layers use Blend or Overlay. Legacy paint-protection modes require a legacy project."
+                                  : "Legacy projection behavior. Rebuild projection layers to use the corrected pipeline.");
+    auto model = qobject_cast<QStandardItemModel *>(blendMode_->model());
+    if (model)
+        for (int i = 0; i < blendMode_->count(); ++i)
+            model->item(i)->setEnabled(!parity_ || blendMode_->itemData(i) == "blend" || blendMode_->itemData(i) == "overlay");
+    blendMode_->setItemText(blendMode_->findData("blend"), parity_ ? "Blend" : "Blend by camera quality");
+    blendMode_->setItemText(blendMode_->findData("overlay"), parity_ ? "Overlay" : "Camera projection (repaint)");
+}
+void AiPanel::applyLayerEdit(QList<QJsonObject> records, int rebakeIndex, int selected,
+                             const QString &message, const QString &isolation, bool rebuild) {
+    if (busy_ || externalBusy_ || installer_.busy() || setupLease_ || !scene_)
+        return;
+    if ((rebuild || (parity_ && rebakeIndex >= 0)) && !projectionError_.isEmpty()) {
+        status_->setText("Projection renderer unavailable: " + projectionError_ +
+                         ". Accepted projections remain unchanged.");
         return;
     }
-    const int uv = uv_->currentIndex();
+    if (native_.joinable())
+        native_.join();
+    const auto previous = historyState();
+    const auto scene = scene_;
+    const auto base = layerBase_;
+    const bool parity = parity_ || rebuild;
+    const int uv = uv_->currentIndex(), resolution = resolution_->currentData().toInt();
+    const bool contentChange = rebuild || rebakeIndex >= 0;
+    if (contentChange) {
+        layerFrames_.clear();
+        layerDecoded_.clear();
+    } else {
+        layerFrames_.insert(compositionKey(base, projections_, parity_, isolatedLayer_),
+                            new AiAtlases(atlases_), compositionCost(atlases_));
+        if (const auto cached = layerFrames_.object(compositionKey(base, records, parity, isolation))) {
+            undo_ << previous;
+            if (undo_.size() > 10)
+                undo_.removeFirst();
+            redo_.clear();
+            projections_ = records;
+            atlases_ = *cached;
+            isolatedLayer_ = isolation;
+            ++revision_;
+            refreshLayers();
+            if (selected >= 0 && selected < records.size())
+                layers_->setCurrentRow(records.size() - 1 - selected);
+            updatePreview();
+            refresh();
+            status_->setText(message);
+            return;
+        }
+    }
     cancel_ = false;
     setBusy(true);
-    const bool legacy = std::any_of(records.begin(), records.end(), [](const QJsonObject &r) {
-        return r["uvLayer"].toObject()["version"].toInt() != 1;
-    });
-    status_->setText(legacy ? "Reconstructing saved projection layers once… No AI generation is needed."
-                            : "Compositing visible projection layers…");
-    native_ = std::thread([this, scene, base, records, uv, index, visible, legacy] {
+    status_->setText(rebuild ? "Rebuilding every saved projection layer. No AI generation is needed..."
+                            : "Updating projection layers...");
+    native_ = std::thread([this, previous, scene, base, records, parity, uv, resolution,
+                           rebakeIndex, selected, message, isolation, rebuild]() mutable {
         try {
-            auto prepared = legacy ? aiPrepareLayers(*scene, uv, base, records, &cancel_) : records;
-            const auto before = prepared;
-            prepared[index]["visible"] = visible;
-            auto composed = aiComposeLayers(base, prepared, &cancel_, &layerDecoded_);
+            if (rebuild)
+                records = aiRebuildProjectionLayers(*scene, uv, resolution, records, &cancel_);
+            else if (parity && rebakeIndex >= 0)
+                records[rebakeIndex] = aiBakeProjectionLayer(*scene, uv, resolution, records[rebakeIndex], &cancel_);
+            else if (!parity && std::any_of(records.begin(), records.end(), [](const QJsonObject &r) {
+                         return r["uvLayer"].toObject()["version"].toInt() != 1;
+                     })) {
+                // Legacy paint operations depend on the stack below them. Freeze
+                // the original order before applying visibility, order or deletion.
+                const auto frozen = aiPrepareLayers(*scene, uv, base, previous.projections, &cancel_);
+                QMap<QString, QJsonObject> layersById;
+                for (const auto &record : frozen)
+                    layersById.insert(record["layerId"].toString(), record["uvLayer"].toObject());
+                for (auto &record : records) {
+                    if (record["uvLayer"].toObject()["version"].toInt() == 1)
+                        continue;
+                    const auto id = record["layerId"].toString();
+                    if (id.isEmpty() || !layersById.contains(id))
+                        throw std::runtime_error("Saved projection identity is missing");
+                    record["uvLayer"] = layersById.value(id);
+                }
+            }
+            auto effective = records;
+            if (!isolation.isEmpty())
+                for (auto &record : effective)
+                    record["visible"] = record["layerId"].toString() == isolation;
+            auto composed = parity ? aiComposeParityLayers(base, effective, &cancel_)
+                                   : aiComposeLayers(base, effective, &cancel_, &layerDecoded_);
             QMetaObject::invokeMethod(
                 this,
-                [this, before, prepared, composed] {
+                [this, previous, records, composed, parity, isolation, selected, message, rebuild] {
                     if (native_.joinable())
                         native_.join();
                     if (cancel_) {
                         fail("Cancelled");
                         return;
                     }
-                    undo_ << HistoryState{atlases_, before};
+                    undo_ << previous;
                     if (undo_.size() > 10)
                         undo_.removeFirst();
                     redo_.clear();
-                    projections_ = prepared;
+                    projections_ = records;
                     atlases_ = composed;
+                    parity_ = parity;
+                    isolatedLayer_ = isolation;
+                    layerDecoded_.clear();
+                    layerFrames_.insert(compositionKey(layerBase_, projections_, parity_, isolatedLayer_),
+                                        new AiAtlases(atlases_), compositionCost(atlases_));
                     ++revision_;
+                    if (rebuild)
+                        blendMode_->setCurrentIndex(blendMode_->findData("blend"));
                     updatePreview();
                     refreshLayers();
-                    status_->setText(
-                        "Layer visibility updated. Preview, coverage and export use visible layers.");
+                    if (selected >= 0 && selected < projections_.size())
+                        layers_->setCurrentRow(projections_.size() - 1 - selected);
+                    status_->setText(message);
                     setBusy(false);
                 },
                 Qt::QueuedConnection);
@@ -1219,6 +1460,101 @@ void AiPanel::setLayerVisible(int index, bool visible) {
                 this, [this, message] { fail(message); }, Qt::QueuedConnection);
         }
     });
+}
+void AiPanel::deleteLayer(int index) {
+    if (busy_ || externalBusy_ || index < 0 || index >= projections_.size())
+        return;
+    auto records = projections_;
+    const QString deleted = records[index]["layerId"].toString();
+    records.removeAt(index);
+    applyLayerEdit(records, -1, records.empty() ? -1 : std::min(index, int(records.size()) - 1),
+                   "Layer deleted. Undo restores it.", isolatedLayer_ == deleted ? QString() : isolatedLayer_);
+}
+void AiPanel::moveLayer(int index, int offset) {
+    if (busy_ || externalBusy_ || index < 0 || index >= projections_.size() ||
+        index + offset < 0 || index + offset >= projections_.size())
+        return;
+    auto records = projections_;
+    records.move(index, index + offset);
+    applyLayerEdit(records, -1, index + offset, "Layer order updated.", isolatedLayer_);
+}
+void AiPanel::replaceLayerImage(int index) {
+    if (busy_ || externalBusy_ || index < 0 || index >= projections_.size())
+        return;
+    if (!parity_) {
+        status_->setText("Rebuild projection layers before replacing a layer image.");
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(this, "Replace layer image", {},
+                                                     "Images (*.png *.jpg *.jpeg *.tif *.tiff *.tga)");
+    if (path.isEmpty())
+        return;
+    QString error;
+    QImage image = readTextureImage(path, &error);
+    if (image.isNull() || image.width() != image.height()) {
+        status_->setText(image.isNull() ? error : "Use a square image with the captured camera's framing.");
+        return;
+    }
+    auto records = projections_;
+    records[index]["sourceImage"] = imageData(image);
+    records[index]["candidate"] = imageData(image.scaled(
+        aiCameraFromJson(records[index]["camera"].toObject()).size,
+        aiCameraFromJson(records[index]["camera"].toObject()).size,
+        Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    applyLayerEdit(records, index, index, "Layer image replaced. Undo restores the previous image.", isolatedLayer_);
+}
+void AiPanel::editLayerMask(int index, bool uv) {
+    if (busy_ || externalBusy_ || index < 0 || index >= projections_.size())
+        return;
+    if (!parity_) {
+        status_->setText("Rebuild projection layers before editing a saved layer mask.");
+        return;
+    }
+    const auto record = projections_[index];
+    const QString key = uv ? "uvMask" : "userMask";
+    QImage image = uv ? atlases_.value(atlasChoice_->currentText()).color
+                     : QImage::fromData(QByteArray::fromBase64(
+                           record["sourceImage"].toString(record["candidate"].toString()).toLatin1()), "PNG");
+    if (image.isNull())
+        return;
+    QImage mask = QImage::fromData(QByteArray::fromBase64(record[key].toString().toLatin1()), "PNG");
+    if (mask.isNull() && !uv)
+        mask = QImage::fromData(QByteArray::fromBase64(record["mask"].toString().toLatin1()), "PNG");
+    if (mask.isNull()) {
+        mask = QImage(image.size(), QImage::Format_RGB32);
+        mask.fill(Qt::white);
+    }
+    if (mask.size() != image.size())
+        mask = mask.scaled(image.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    QDialog dialog(this);
+    dialog.setWindowTitle(uv ? "Edit layer UV mask" : "Edit layer camera mask");
+    auto layout = new QVBoxLayout(&dialog);
+    auto instruction = new QLabel("Left drag excludes paint; right drag restores it. White keeps paint.");
+    instruction->setWordWrap(true);
+    layout->addWidget(instruction);
+    auto editor = new AiMaskCanvas;
+    editor->brush = brush_->value();
+    editor->set(image, mask);
+    layout->addWidget(editor, 1);
+    auto buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.resize(650, 730);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    auto records = projections_;
+    records[index][key] = imageData(editor->mask);
+    if (!uv)
+        records[index]["mask"] = records[index][key];
+    applyLayerEdit(records, index, index, "Layer mask updated.", isolatedLayer_);
+}
+void AiPanel::rebuildProjectionLayers() {
+    if (busy_ || externalBusy_ || !scene_ || projections_.empty())
+        return;
+    applyLayerEdit(projections_, -1, selectedLayer(),
+                   "Projection layers rebuilt. Saved images were reused; Undo restores the previous stack.",
+                   isolatedLayer_, true);
 }
 void AiPanel::setBusy(bool b) {
     busy_ = b;
@@ -1276,13 +1612,19 @@ void AiPanel::refreshMultiviewViews() {
 std::optional<float> AiPanel::frontYaw(int excludeLayer) const {
     // The first visible accepted view defines the front for view-aware generation.
     for (int i = 0; i < projections_.size(); ++i)
-        if (i != excludeLayer && projections_[i]["visible"].toBool(true))
+        if (i != excludeLayer && (isolatedLayer_.isEmpty() ? projections_[i]["visible"].toBool(true)
+                                                           : projections_[i]["layerId"].toString() == isolatedLayer_))
             return float(projections_[i]["camera"].toObject()["yaw"].toDouble());
     return std::nullopt;
 }
 void AiPanel::regenerateLayer(int index) {
     if (busy_ || externalBusy_ || !scene_ || !modelReady() || index < 0 || index >= projections_.size())
         return;
+    if (parity_ && !projectionError_.isEmpty()) {
+        status_->setText("Projection renderer unavailable: " + projectionError_ +
+                         ". Accepted projections remain unchanged.");
+        return;
+    }
     if (prompt_->toPlainText().trimmed().isEmpty() && referencePaths().empty()) {
         status_->setText("Describe the appearance or add a reference image before regenerating.");
         return;
@@ -1305,13 +1647,18 @@ void AiPanel::regenerateLayer(int index) {
     const auto base = layerBase_;
     const auto records = projections_;
     const int uv = uv_->currentIndex();
-    native_ = std::thread([this, scene, base, records, uv, index] {
+    const bool parity = parity_;
+    const QString isolation = isolatedLayer_;
+    native_ = std::thread([this, scene, base, records, uv, index, parity, isolation] {
         try {
             // The layer must not feed its own replacement: compose the stack without it.
-            const bool legacy = std::any_of(records.begin(), records.end(), [](const QJsonObject &r) {
+            const bool legacy = !parity && std::any_of(records.begin(), records.end(), [](const QJsonObject &r) {
                 return r["uvLayer"].toObject()["version"].toInt() != 1;
             });
             auto prepared = legacy ? aiPrepareLayers(*scene, uv, base, records, &cancel_) : records;
+            if (!isolation.isEmpty())
+                for (auto &record : prepared)
+                    record["visible"] = record["layerId"].toString() == isolation;
             prepared[index]["visible"] = false;
             const auto without = aiComposeLayers(base, prepared, &cancel_, &layerDecoded_);
             const auto camera = aiCameraFromJson(records[index]["camera"].toObject());
@@ -1537,6 +1884,17 @@ void AiPanel::workerEvent(const QJsonObject &event) {
             return;
         }
         candidate_ = readTextureImage(event["output"].toString());
+        if (!candidate_.isNull()) {
+            const QImage original = event["sourceImage"].toString().isEmpty()
+                                        ? candidate_ : readTextureImage(event["sourceImage"].toString());
+            if (original.isNull()) {
+                fail("AI returned an invalid original source image");
+                return;
+            }
+            candidateSettings_["sourceImage"] = imageData(original);
+            if (parity_)
+                candidate_ = original;
+        }
         const bool cloud = candidateSettings_["model"] == "gpt-image-2";
         QImage cloudMask;
         if (cloud && capture_ && lock_ && !candidate_.isNull()) {
@@ -1546,15 +1904,17 @@ void AiPanel::workerEvent(const QJsonObject &event) {
             }
             try {
                 // GPT Image returns its own square size with the guide's framing, so a resize aligns it.
-                candidate_ = candidate_.convertToFormat(QImage::Format_RGB32)
+                candidate_ = candidate_.convertToFormat(parity_ ? QImage::Format_RGBA8888 : QImage::Format_RGB32)
                                  .scaled(capture_->camera.size, capture_->camera.size, Qt::IgnoreAspectRatio,
                                          Qt::SmoothTransformation);
                 // Register the painted features onto the mesh before anything else uses the image.
-                double shift = 0;
-                candidate_ = aiAlignToGeometry(*capture_, candidate_, &shift);
-                candidateSettings_["alignmentShift"] = shift;
-                candidate_ = aiComposeLocked(*capture_, *lock_, aiMatchLockedTone(*capture_, *lock_, candidate_));
-                cloudMask = aiGeneratedPaintMask(*capture_, *lock_, candidate_);
+                if (!parity_) {
+                    double shift = 0;
+                    candidate_ = aiAlignToGeometry(*capture_, candidate_, &shift);
+                    candidateSettings_["alignmentShift"] = shift;
+                    candidate_ = aiComposeLocked(*capture_, *lock_, aiMatchLockedTone(*capture_, *lock_, candidate_));
+                    cloudMask = aiGeneratedPaintMask(*capture_, *lock_, candidate_);
+                }
             } catch (const std::exception &e) {
                 fail(QString::fromUtf8(e.what()));
                 return;
@@ -1570,7 +1930,7 @@ void AiPanel::workerEvent(const QJsonObject &event) {
             if (!detail.isNull())
                 candidateSettings_["detailReferenceImage"] = imageData(detail);
         }
-        if (!event["preservationMask"].toString().isEmpty()) {
+        if (!parity_ && !event["preservationMask"].toString().isEmpty()) {
             candidateRetention_ = readTextureImage(event["preservationMask"].toString());
             if (candidateRetention_.size() != candidate_.size()) {
                 fail("AI returned an invalid retained-detail mask");
@@ -1584,7 +1944,15 @@ void AiPanel::workerEvent(const QJsonObject &event) {
         // The worker guards surfaces it left as background white on bare clay; they start excluded
         // from projection (red in the mask) and can be restored with a right drag.
         QImage mask = capture_->silhouette.convertToFormat(QImage::Format_RGB32);
-        if (!event["guardMask"].toString().isEmpty()) {
+        if (parity_ && regenerateIndex_ >= 0 && regenerateIndex_ < projections_.size()) {
+            const auto previous = projections_[regenerateIndex_];
+            const auto originalMask = previous["userMask"].isString() ? previous["userMask"] : previous["mask"];
+            const auto saved = QImage::fromData(QByteArray::fromBase64(originalMask.toString().toLatin1()), "PNG");
+            if (!saved.isNull())
+                mask = saved.convertToFormat(QImage::Format_RGB32).scaled(
+                    mask.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        }
+        if (!parity_ && !event["guardMask"].toString().isEmpty()) {
             const QImage guard = readTextureImage(event["guardMask"].toString()).convertToFormat(QImage::Format_Grayscale8);
             if (guard.size() == mask.size())
                 for (int y = 0; y < mask.height(); ++y)
@@ -1633,6 +2001,10 @@ AiProjectionOptions AiPanel::projectionOptions() const {
 void AiPanel::projectCandidate(bool automatic) {
     if ((busy_ && !automatic) || externalBusy_ || !scene_ || !capture_ || candidate_.isNull())
         return;
+    if (parity_ && !projectionError_.isEmpty()) {
+        fail("Projection renderer unavailable: " + projectionError_);
+        return;
+    }
     if (native_.joinable())
         native_.join();
     if (!automatic) {
@@ -1648,9 +2020,9 @@ void AiPanel::projectCandidate(bool automatic) {
     int uv = uv_->currentIndex();
     bool fill = blendMode_->currentData() == "fill";
     auto options = projectionOptions();
-    // Cloud views carry ownership in their mask: the lock core is excluded and its outer band ramps, so the view
-    // crossfades into accepted paint there (Modddif-style soft seams) instead of switching at a hard edge.
-    const bool ownedByMask = candidateSettings_["model"] == "gpt-image-2" && blendMode_->currentData() == "lock";
+    // Legacy cloud views carry ownership in their mask: the lock core is excluded and its outer band ramps,
+    // crossfading into accepted paint. Independent parity layers do not use this legacy mask behavior.
+    const bool ownedByMask = !parity_ && candidateSettings_["model"] == "gpt-image-2" && blendMode_->currentData() == "lock";
     if (ownedByMask) {
         options.lockQuality = 0;
         options.overlay = true;
@@ -1660,6 +2032,9 @@ void AiPanel::projectCandidate(bool automatic) {
     QJsonObject record = candidateSettings_;
     record["candidate"] = imageData(candidate);
     record["mask"] = imageData(mask);
+    if (parity_)
+        record["userMask"] = imageData(mask);
+    record["layerId"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
     record["materials"] = QJsonArray::fromStringList(materials.values());
     record["fillOnly"] = fill;
     record["blending"] = QJsonObject{{"mode", ownedByMask ? QString("overlay") : blendMode_->currentData().toString()},
@@ -1671,13 +2046,59 @@ void AiPanel::projectCandidate(bool automatic) {
                                      {"fillGaps", options.fillGaps},
                                      {"coverAll", options.coverAll},
                                      {"colorMatch", options.colorMatch}};
+    if (parity_)
+        record["blending"] = QJsonObject{{"mode", options.overlay ? "overlay" : "blend"},
+                                          {"strength", options.strength}, {"depthMargin", 2}};
     status_->setText("Projecting visible surfaces into UV space…");
     const int replace = regenerateIndex_;
     const auto base = layerBase_;
     const auto records = projections_;
+    const bool parity = parity_;
+    const QString isolation = isolatedLayer_;
+    const int resolution = resolution_->currentData().toInt();
     native_ = std::thread([this, scene, capture, atlases, candidate, mask, materials, uv, fill, record, options,
-                           replace, base, records] {
+                           replace, base, records, parity, resolution, isolation] {
         try {
+            if (parity) {
+                auto prepared = records;
+                auto toBake = record;
+                if (replace >= 0) {
+                    const auto previous = prepared[replace];
+                    toBake["blending"] = previous["blending"];
+                    toBake["materials"] = previous["materials"];
+                    if (previous.contains("uvMask"))
+                        toBake["uvMask"] = previous["uvMask"];
+                }
+                auto baked = aiBakeProjectionLayer(*scene, uv, resolution, toBake, &cancel_);
+                baked["visible"] = true;
+                if (replace >= 0) {
+                    baked["layerId"] = prepared[replace]["layerId"];
+                    baked["visible"] = prepared[replace]["visible"];
+                    prepared[replace] = baked;
+                } else
+                    prepared.append(baked);
+                auto effective = prepared;
+                if (!isolation.isEmpty())
+                    for (auto &r : effective)
+                        r["visible"] = r["layerId"].toString() == isolation;
+                auto result = std::make_shared<AiProjection>();
+                result->atlases = aiComposeParityLayers(base, effective, &cancel_);
+                result->layer = baked["uvLayer"].toObject();
+                const auto contribution = aiDecodeProjectionLayer(result->layer);
+                for (const auto &image : contribution.materials)
+                    for (int y = 0; y < image.height(); ++y) {
+                        const uchar *pixels = image.constScanLine(y);
+                        for (int x = 0; x < image.width(); ++x)
+                            result->changed += pixels[x * 4 + 3] != 0;
+                    }
+                if (replace >= 0)
+                    QMetaObject::invokeMethod(this, [this, result, prepared] { finishRegeneration(*result, prepared); },
+                                               Qt::QueuedConnection);
+                else
+                    QMetaObject::invokeMethod(this, [this, result, baked] { finishProjection(*result, baked); },
+                                               Qt::QueuedConnection);
+                return;
+            }
             if (replace >= 0) {
                 // Regenerated layer: project onto the stack below it, put it back at the same position, then
                 // replay the layers above it on top.
@@ -1691,8 +2112,9 @@ void AiPanel::projectCandidate(bool automatic) {
                 auto result = std::make_shared<AiProjection>(aiProject(
                     *scene, uv, below, *capture, candidate, mask, materials, fill, 8, &cancel_, options));
                 QJsonObject layerRecord = record;
+                layerRecord["layerId"] = prepared[replace]["layerId"];
                 layerRecord["uvLayer"] = result->layer;
-                layerRecord["visible"] = true;
+                layerRecord["visible"] = prepared[replace]["visible"];
                 layerRecord["regeneratedFrom"] = prepared[replace]["seed"];
                 prepared[replace] = layerRecord;
                 result->atlases = aiComposeLayers(base, prepared, &cancel_, &layerDecoded_);
@@ -1723,7 +2145,7 @@ void AiPanel::finishProjection(const AiProjection &result, const QJsonObject &re
         layerDecoded_.clear();
         if (projections_.empty())
             layerBase_ = atlases_;
-        undo_ << HistoryState{atlases_, projections_};
+        undo_ << historyState();
         if (undo_.size() > 10)
             undo_.removeFirst();
         redo_.clear();
@@ -1736,6 +2158,8 @@ void AiPanel::finishProjection(const AiProjection &result, const QJsonObject &re
     }
     updatePreview();
     refreshLayers();
+    if (result.changed)
+        layers_->setCurrentRow(0);
     if (result.changed)
         status_->setText(
             QString("Projected %1 texels from the generated camera. Undo is available.").arg(result.changed));
@@ -1766,7 +2190,7 @@ void AiPanel::finishRegeneration(const AiProjection &result, const QList<QJsonOb
     regenerateIndex_ = -1;
     layerFrames_.clear(); // Same visibility key, different content.
     layerDecoded_.clear();
-    undo_ << HistoryState{atlases_, projections_};
+    undo_ << historyState();
     if (undo_.size() > 10)
         undo_.removeFirst();
     redo_.clear();
@@ -1777,6 +2201,8 @@ void AiPanel::finishRegeneration(const AiProjection &result, const QList<QJsonOb
     updatePreview();
     layers_->clear(); // Same layer count: force new thumbnails.
     refreshLayers();
+    if (index >= 0 && index < projections_.size())
+        layers_->setCurrentRow(projections_.size() - 1 - index);
     status_->setText(QString("Projection %1 regenerated in place; the layers above it were reapplied. Undo restores "
                              "the previous version.")
                          .arg(index + 1));
@@ -1865,6 +2291,8 @@ void AiPanel::saveProject() {
         QCryptographicHash hash(QCryptographicHash::Sha256);
         hash.addData(&mesh);
         QJsonObject settings{{"mesh", QDir(QFileInfo(path).absolutePath()).relativeFilePath(meshPath_)},
+                             {"projectionBackend", parity_ ? "modddif-v1" : "legacy"},
+                             {"isolatedLayer", isolatedLayer_},
                              {"meshSha256", QString::fromLatin1(hash.result().toHex())},
                              {"uv", uv_->currentIndex()},
                              {"resolution", resolution_->currentData().toInt()},
@@ -1932,6 +2360,8 @@ void AiPanel::openProject() {
                 "Project mesh has changed; restore the original mesh to preserve projection alignment");
         if (!loadMesh(meshPath))
             return;
+        parity_ = settings["projectionBackend"].toString() == "modddif-v1";
+        isolatedLayer_ = settings["isolatedLayer"].toString();
         loading_ = true;
         uv_->setCurrentIndex(settings["uv"].toInt());
         resolution_->setCurrentIndex(resolution_->findData(settings["resolution"].toInt()));
@@ -2028,7 +2458,8 @@ void AiPanel::openProject() {
         }
         updatePreview();
         refresh();
-        status_->setText("Project restored without running inference.");
+        status_->setText(parity_ ? "Project restored without running inference."
+                                : "Legacy project restored unchanged. Rebuild projection layers to use the corrected projection pipeline.");
     } catch (const std::exception &e) {
         loading_ = false;
         status_->setText(QString::fromUtf8(e.what()));

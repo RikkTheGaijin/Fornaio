@@ -195,6 +195,21 @@ class TrustedDetailTests(unittest.TestCase):
 
 
 class GeometryDiagnosticsTests(unittest.TestCase):
+    def test_original_source_survives_legacy_detail_restoration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            generated = Image.new("RGB", (32, 32), "blue")
+            accepted = save(directory, "accepted", Image.new("RGB", (32, 32), "red"))
+            mask = save(directory, "confidence", Image.new("L", (32, 32), 255))
+            output = str(pathlib.Path(directory) / "output.png")
+            source, retained, _ = worker.save_generation_images(generated, dict(
+                conditioning="confidence", accepted=accepted, feedbackMask=mask, silhouette=mask,
+                protectDetails=True), output)
+            with Image.open(source) as raw:
+                self.assertEqual(raw.getpixel((16, 16)), (0, 0, 255))
+            with Image.open(output) as processed:
+                self.assertEqual(processed.getpixel((16, 16)), (255, 0, 0))
+            self.assertTrue(pathlib.Path(retained).is_file())
+
     def test_exact_and_shifted_silhouettes(self):
         with tempfile.TemporaryDirectory() as directory:
             mask = Image.new("L", (64, 64), 0)

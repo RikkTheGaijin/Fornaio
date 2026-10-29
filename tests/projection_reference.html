@@ -1,0 +1,105 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Fornaio projection reference</title>
+<style>body{font:14px monospace;background:#17202a;color:#edf4fa}canvas{image-rendering:pixelated;width:180px;height:180px}pre{white-space:pre-wrap}</style>
+<h1>Projection reference</h1>
+<p>Standalone, offline WebGL2 pixel oracle. Open this file, then save the JSON below as
+<code>projection_reference_golden.json</code>. No Fornaio rendering code is imported.</p>
+<canvas id="canvas" width="9" height="9"></canvas><pre id="result">Running…</pre>
+<script>
+// Behavioral reference: app.modddif.com/assets/main-BZiTw8uP.js, observed 2026-10-29.
+// Bundle SHA-256: f5826dcf78e6215d72841cbcca0a47e8afa9d6768a70f55d321249477615b9f2.
+// Isolated pixel fixtures intentionally avoid raster-boundary/driver differences.
+'use strict';
+try {
+const gl=document.querySelector('canvas').getContext('webgl2',{antialias:false,premultipliedAlpha:false,preserveDrawingBuffer:true});
+if(!gl)throw Error('WebGL2 is required');
+if(!gl.getExtension('EXT_color_buffer_float'))throw Error('EXT_color_buffer_float is required');
+gl.disable(gl.BLEND);gl.disable(gl.DITHER);gl.disable(gl.DEPTH_TEST);gl.disable(gl.CULL_FACE);
+const vertex=`#version 300 es
+void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.-1.,0.,1.);}`;
+function program(fragment){function shader(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s;}const p=gl.createProgram();gl.attachShader(p,shader(gl.VERTEX_SHADER,vertex));gl.attachShader(p,shader(gl.FRAGMENT_SHADER,fragment));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(p));return p;}
+function texture(w,h,data,float=false,linear=false){const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,linear?gl.LINEAR:gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,linear?gl.LINEAR:gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);gl.texImage2D(gl.TEXTURE_2D,0,float?gl.RGBA32F:gl.RGBA8,w,h,0,gl.RGBA,float?gl.FLOAT:gl.UNSIGNED_BYTE,data);return t;}
+function target(w,h,float=false){const t=texture(w,h,null,float);const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw Error('Incomplete framebuffer');return {f,w,h,float};}
+function run(p,out,uniforms={},textures={}){gl.bindFramebuffer(gl.FRAMEBUFFER,out.f);gl.viewport(0,0,out.w,out.h);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.useProgram(p);for(const [key,v]of Object.entries(uniforms)){const u=gl.getUniformLocation(p,key);if(Array.isArray(v))gl['uniform'+v.length+'fv'](u,v);else if(typeof v==='boolean')gl.uniform1i(u,v?1:0);else gl.uniform1f(u,v);}let unit=0;for(const [name,t]of Object.entries(textures)){gl.activeTexture(gl.TEXTURE0+unit);gl.bindTexture(gl.TEXTURE_2D,t);gl.uniform1i(gl.getUniformLocation(p,name),unit++);}gl.drawArrays(gl.TRIANGLES,0,3);const a=out.float?new Float32Array(out.w*out.h*4):new Uint8Array(out.w*out.h*4);gl.readPixels(0,0,out.w,out.h,gl.RGBA,out.float?gl.FLOAT:gl.UNSIGNED_BYTE,a);const err=gl.getError();if(err!==gl.NO_ERROR)throw Error('GL error '+err);return [...a];}
+const projection=program(`#version 300 es
+precision highp float;
+uniform sampler2D sourceImage,depthImage;
+uniform vec3 normal;
+uniform vec2 sourceUv;
+uniform float clipW,fragmentDepth,cameraMask,uvMask,depthMargin;
+uniform bool orthographic,overlay;
+out vec4 color;
+void main(){
+ vec4 src=texture(sourceImage,sourceUv);if(src.a==0.)discard;
+ float alpha=src.a;vec3 dir=vec3(0.,0.,1.);
+ if(!overlay){float s=dot(normal,dir);if(s<.01)discard;s*=smoothstep(0.,.5,1./clipW);alpha*=s*s;}
+ if(cameraMask<.01||uvMask<.01)discard;alpha*=cameraMask*uvMask;
+ float depth=texture(depthImage,sourceUv).r;
+ float z=fragmentDepth-(orthographic?.00002:.000001)*dot(normalize(normal),dir);
+ if(z>depth||z<depth-.0001)discard;
+ if(depthMargin>0.){ivec2 center=ivec2(sourceUv*vec2(textureSize(depthImage,0)));for(int x=-1;x<=1;x++)for(int y=-1;y<=1;y++){if(x==0&&y==0)continue;if(abs(texelFetch(depthImage,center+ivec2(x,y),0).r-depth)>.001)discard;}}
+ if(alpha==0.)discard;color=vec4(src.rgb/src.a,alpha);
+}`);
+const pixel=target(1,1),floatPixel=target(1,1,true),nine=target(9,9);
+const solid=texture(1,1,new Uint8Array([200,80,30,255]));
+function depthTexture(offset=0,neighbor=[1,0]){const a=new Float32Array(9*9*4);for(let i=0;i<81;i++){a[4*i]=.5;a[4*i+3]=1;}if(offset)a[4*((4+neighbor[1])*9+4+neighbor[0])]=.5+offset;return texture(9,9,a,true);}
+const depth=depthTexture();
+const cases=[];
+function project(name,settings={},source=solid,d=depth){const defaults={normal:[0,0,1],sourceUv:[.5,.5],clipW:1,fragmentDepth:.5,cameraMask:1,uvMask:1,depthMargin:0,orthographic:true,overlay:false};const args={...defaults,...settings};const rgba=run(projection,pixel,args,{sourceImage:source,depthImage:d});cases.push({name,kind:'projection',settings:args,rgba});return rgba;}
+for(const angle of [0,30,60,70,80,86,89]){const r=angle*Math.PI/180;project('orthographic_'+angle,{normal:[Math.sin(r),0,Math.cos(r)]});}
+project('cosine_below_cutoff',{normal:[Math.sqrt(1-.009*.009),0,.009]});
+project('cosine_above_cutoff_quantizes_to_zero',{normal:[Math.sqrt(1-.011*.011),0,.011]});
+project('overlay_bypasses_similarity',{normal:[1,0,0],overlay:true});
+project('interpolated_normal_not_renormalized',{normal:[.5,0,.5]});
+project('perspective_distance_falloff',{clipW:4,orthographic:false});
+project('camera_and_uv_mask',{cameraMask:.5,uvMask:.25});
+project('excluded_camera_mask',{cameraMask:.009});
+project('excluded_uv_mask',{uvMask:.009});
+project('depth_in_front_accepted',{fragmentDepth:.49995});
+project('depth_too_far_in_front_rejected',{fragmentDepth:.4998});
+project('depth_behind_rejected',{fragmentDepth:.50004});
+project('depth_bias_orthographic',{fragmentDepth:.50001});
+project('depth_bias_perspective',{fragmentDepth:.50001,orthographic:false});
+project('depth_continuous_neighborhood',{depthMargin:1});
+project('depth_discontinuity_rejected',{depthMargin:1},solid,depthTexture(.002));
+project('depth_discontinuity_disabled',{depthMargin:0},solid,depthTexture(.002));
+for(let y=-1;y<=1;y++)for(let x=-1;x<=1;x++)if(x||y)project('depth_discontinuity_neighbor_'+x+'_'+y,{depthMargin:1},solid,depthTexture(.002,[x,y]));
+// Premultiplied source: opaque red beside fully transparent blue (hidden RGB is zero).
+const transparentEdge=texture(2,1,new Uint8Array([200,0,0,255,0,0,0,0]),false,true);
+project('premultiplied_bilinear_edge',{},transparentEdge);
+project('fractional_source_alpha',{},texture(1,1,new Uint8Array([100,40,15,128])));
+const erosion=program(`#version 300 es
+precision highp float;uniform sampler2D maskImage;out vec4 color;
+void main(){ivec2 p=ivec2(gl_FragCoord.xy);for(int x=-2;x<=2;x++)for(int y=-2;y<=2;y++)if(texelFetch(maskImage,clamp(p+ivec2(x,y),ivec2(0),ivec2(8)),0).r<1.){color=vec4(0);return;}color=vec4(1);}`);
+const maskPixels=new Uint8Array(9*9*4);for(let y=1;y<=7;y++)for(let x=1;x<=7;x++)maskPixels.fill(255,4*(y*9+x),4*(y*9+x)+4);
+const eroded=run(erosion,nine,{}, {maskImage:texture(9,9,maskPixels)});
+cases.push({name:'square_erosion_radius_2',kind:'erosion',width:9,height:9,inputAlpha:[...maskPixels.filter((_,i)=>i%4===0)],alpha:eroded.filter((_,i)=>i%4===3)});
+const padding=program(`#version 300 es
+precision highp float;precision highp int;uniform sampler2D islandImage,paintImage;out vec4 color;
+void main(){ivec2 p=ivec2(gl_FragCoord.xy),size=textureSize(islandImage,0);ivec2 best=p;int distance=26;if(texelFetch(islandImage,p,0).r<=.5){for(int y=-5;y<=5;y++)for(int x=-5;x<=5;x++){int d=x*x+y*y;if(d>=distance)continue;ivec2 q=p+ivec2(x,y);if(any(lessThan(q,ivec2(0)))||any(greaterThanEqual(q,size)))continue;if(texelFetch(islandImage,q,0).r>.5){best=q;distance=d;}}}color=texelFetch(paintImage,best,0);}`);
+const islandPixels=new Uint8Array(13*13*4),paintPixels=new Uint8Array(13*13*4);
+for(let y=5;y<=7;y++)for(let x=5;x<=7;x++){const i=4*(y*13+x);islandPixels.fill(255,i,i+4);if(x!==6||y!==6)paintPixels.set([200,80,30,255],i);}
+const padded=run(padding,target(13,13),{},{islandImage:texture(13,13,islandPixels),paintImage:texture(13,13,paintPixels)});
+cases.push({name:'uv_padding_outside_islands_only',kind:'padding',width:13,height:13,inputIsland:[...islandPixels.filter((_,i)=>i%4===0)],inputAlpha:[...paintPixels.filter((_,i)=>i%4===3)],alpha:padded.filter((_,i)=>i%4===3)});
+const composition=program(`#version 300 es
+precision highp float;
+uniform vec4 first,second,third;uniform vec3 strengths,modes;uniform bool normalized;
+out vec4 color;
+void main(){vec4 sum=vec4(0);float coverage=0.;for(int i=0;i<3;i++){vec4 c=i==0?first:i==1?second:third;float strength=strengths[i];if(modes[i]>.5)strength=min(strength,1.);c.a*=strength;c.rgb*=c.a;coverage=max(coverage,c.a);if(modes[i]>.5)sum=sum*max(0.,1.-c.a)+c;else sum+=c;}color=normalized?vec4(sum.a>.001?sum.rgb/sum.a:vec3(0),coverage):sum;}`);
+function compose(name,layers,strengths,modes){const args={first:layers[0],second:layers[1],third:layers[2],strengths,modes};cases.push({name,kind:'composition',layers,strengths,modes,accumulator:run(composition,floatPixel,{...args,normalized:false}),normalizedFloat:run(composition,floatPixel,{...args,normalized:true}),rgba:run(composition,pixel,{...args,normalized:true})});}
+const zero=[0,0,0,0];
+compose('encoded_rgb_black_white_average',[[0,0,0,1],[1,1,1,1],zero],[1,1,1],[0,0,0]);
+compose('unequal_blend_weights',[[1,0,0,1],[0,0,1,.25],zero],[1,1,1],[0,0,0]);
+compose('blend_order_reversed',[[0,0,1,.25],[1,0,0,1],zero],[1,1,1],[0,0,0]);
+compose('mixed_blend_overlay',[[1,0,0,1],[0,1,0,.5],[0,0,1,.25]],[1,1,1],[0,1,0]);
+compose('blend_strength_above_one',[[1,0,0,.25],[0,0,1,.5],zero],[2,1,1],[0,0,0]);
+compose('overlay_strength_clamped',[[1,0,0,1],[0,0,1,.5],zero],[1,2,1],[0,1,0]);
+compose('zero_strength_empty',[[1,0,0,1],zero,zero],[0,1,1],[0,0,0]);
+compose('blend_max_coverage_not_sum',[[1,0,0,.25],[0,1,0,.25],[0,0,1,.25]],[1,1,1],[0,0,0]);
+compose('blend_max_coverage_above_one',[[1,0,0,1],zero,zero],[2,1,1],[0,0,0]);
+const dbg=gl.getExtension('WEBGL_debug_renderer_info');
+const output={format:'FornaioWebGLProjectionReference',version:1,reference:{url:'https://app.modddif.com/assets/main-BZiTw8uP.js',sha256:'f5826dcf78e6215d72841cbcca0a47e8afa9d6768a70f55d321249477615b9f2',observed:'2026-10-29'},environment:{userAgent:navigator.userAgent,renderer:dbg?gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER),version:gl.getParameter(gl.VERSION)},tolerance:{rgba8:1,float32:0.000001},cases};
+document.querySelector('#result').textContent=JSON.stringify(output,null,2);document.title='PASS: '+cases.length+' projection reference cases';
+}catch(e){document.querySelector('#result').textContent=JSON.stringify({error:String(e),stack:e.stack},null,2);document.title='FAIL: projection reference';}
+</script>

@@ -296,6 +296,23 @@ def background_guard(image, command):
     return Image.fromarray(np.where(guarded, 0, 255).astype(np.uint8))
 
 
+def save_generation_images(image, command, output):
+    """Keep the provider image before legacy detail restoration for independent layers."""
+    source_path = os.path.splitext(output)[0] + "-source.png"
+    image.save(source_path, format="PNG")
+    image, kept = preserve_trusted_details(image, command)
+    preservation_path = guard_path = ""
+    if kept is not None:
+        preservation_path = os.path.splitext(output)[0] + "-retained.png"
+        kept.save(preservation_path, format="PNG")
+    guard = background_guard(image, command)
+    if guard is not None:
+        guard_path = os.path.splitext(output)[0] + "-guard.png"
+        guard.save(guard_path, format="PNG")
+    image.save(output, format="PNG")
+    return source_path, preservation_path, guard_path
+
+
 def geometry_alignment(image, silhouette_path):
     """Conservative white-background silhouette diagnostic, not a geometry solver.
 
@@ -444,6 +461,7 @@ def main():
                 prepare()
                 timings["prepare"] = time.monotonic() - started
                 output = command["output"]
+                source_path = output
                 preservation_path = guard_path = ""
                 descriptions = []
                 alignment = None
@@ -479,19 +497,12 @@ def main():
                     alignment = geometry_alignment(image, command.get("silhouette"))
                     if command.get("conditioning") == "confidence" and command.get("protectDetails", True):
                         emit("progress", id=request_id, fraction=.97, message="Keeping reliable previous details")
-                    image, kept = preserve_trusted_details(image, command)
-                    if kept is not None:
-                        preservation_path = os.path.splitext(output)[0] + "-retained.png"
-                        kept.save(preservation_path, format="PNG")
-                    guard = background_guard(image, command)
-                    if guard is not None:
-                        guard_path = os.path.splitext(output)[0] + "-guard.png"
-                        guard.save(guard_path, format="PNG")
-                    image.save(output, format="PNG")
+                    source_path, preservation_path, guard_path = save_generation_images(image, command, output)
                     peak = int(torch.cuda.max_memory_allocated() / (1024 * 1024))
                 if cancelled.is_set():
                     raise InterruptedError("Cancelled")
                 emit("result", id=request_id, output=output, seconds=time.monotonic() - started,
+                     sourceImage=source_path,
                      timings=timings, alignment=alignment, preservationMask=preservation_path,
                      referenceDescriptions=descriptions,
                      guardMask=guard_path, peakVramMiB=peak)

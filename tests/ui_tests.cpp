@@ -1,4 +1,5 @@
 #include "window.h"
+#include "ai_projection.h"
 #include <QApplication>
 #include <QComboBox>
 #include <QFile>
@@ -8,6 +9,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
+#include <QScopeGuard>
 #include <QSurfaceFormat>
 #include <QTableWidget>
 #include <QTemporaryDir>
@@ -331,6 +333,7 @@ int main(int argc, char **argv) {
     QSurfaceFormat::setDefaultFormat(format);
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication app(argc, argv);
+    const auto projectionCleanup = qScopeGuard([] { aiShutdownProjectionRenderer(); });
     app.setOrganizationName("Fornaio-Tests");
     app.setApplicationName("UI-regressions");
     QTemporaryDir prefs;

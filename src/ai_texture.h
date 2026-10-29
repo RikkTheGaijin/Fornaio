@@ -4,6 +4,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QSet>
+#include <QVector>
 
 // Images use top-left origins; mesh UVs use bottom-left. All cameras are immutable snapshots.
 struct AiCamera {
@@ -15,6 +16,7 @@ struct AiAtlas {
     QImage color;      // sRGB, padding included
     QImage coverage;   // grayscale; padding never changes coverage
     QImage confidence; // linear 16-bit projection quality, separate from coverage and padding
+    QVector<float> projectionWeight; // parity max weight, may exceed 1; confidence is its clamped guide preview
 };
 using AiAtlases = QMap<QString, AiAtlas>;
 struct AiCapture {
@@ -47,7 +49,7 @@ struct AiProjectionOptions {
     bool recordLayer = false;
     float lockQuality = 0;  // > 0: accepted paint at least this good is never repainted (ownership)
 };
-// Ownership multiview (Modddif-style): paint seen well by an earlier view is locked. A new view's guide shows
+// Legacy ownership multiview: paint seen well by an earlier view is locked. A new view's guide shows
 // the locked paint and bare clay elsewhere; the generated image is composited back over the locked pixels.
 constexpr float aiDefaultLockQuality = .1f;
 struct AiLock {

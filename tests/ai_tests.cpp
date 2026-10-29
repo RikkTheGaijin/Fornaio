@@ -1,4 +1,5 @@
 #include "ai_panel.h"
+#include "ai_layers.h"
 #include <QApplication>
 #include <QBuffer>
 #include <QCheckBox>
@@ -681,6 +682,130 @@ static void savedProjectGapProbe(const QString &path, const QString &root) {
 class AiTests : public QObject {
     Q_OBJECT
   private slots:
+    void parityLayerDeleteReorderIsolationAndHistory() {
+        QTemporaryDir storage;
+        AiPanel p;
+        QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.resolution_->setCurrentIndex(p.resolution_->findData(1024));
+        QVERIFY(p.parity_);
+        const QString material = p.atlases_.firstKey();
+        const auto base = p.atlases_;
+        auto record = [&](QColor color, const QString &id) {
+            QImage image(1024,1024,QImage::Format_RGBA8888);image.fill(color);
+            AiLayerContribution contribution;contribution.materials[material]=image;
+            return QJsonObject{{"layerId",id},{"visible",true},
+                               {"blending",QJsonObject{{"mode","blend"},{"strength",1}}},
+                               {"uvLayer",aiEncodeProjectionLayer(contribution,1024)}};
+        };
+        p.projections_={record(Qt::red,"red"),record(Qt::blue,"blue")};
+        p.atlases_=aiComposeParityLayers(base,p.projections_);
+        const auto both=p.atlases_;
+        p.refreshLayers();p.refresh();
+        QVERIFY(p.findChild<QPushButton *>("aiDeleteLayer")->isEnabled());
+        p.updatePreview();p.resize(1420,900);p.show();QVERIFY(QTest::qWaitForWindowExposed(&p));
+        QVERIFY(p.grab().save(".ai-qa/parity-layer-controls.png"));
+        p.moveLayer(0,1);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        QCOMPARE(p.projections_[1]["layerId"].toString(),QString("red"));
+        QCOMPARE(p.atlases_[material].color,both[material].color);
+        p.applyLayerEdit(p.projections_,-1,1,"Isolate test","red");
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        QCOMPARE(p.atlases_[material].color.pixel(512,512),qRgb(255,0,0));
+        p.deleteLayer(1);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        QCOMPARE(p.projections_.size(),1);QVERIFY(p.isolatedLayer_.isEmpty());
+        QCOMPARE(p.atlases_[material].color.pixel(512,512),qRgb(0,0,255));
+        p.undoButton_->click();QCOMPARE(p.projections_.size(),2);QCOMPARE(p.isolatedLayer_,QString("red"));
+        p.redoButton_->click();QCOMPARE(p.projections_.size(),1);QVERIFY(p.isolatedLayer_.isEmpty());
+        p.deleteLayer(0);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        QVERIFY(p.projections_.empty());QCOMPARE(p.selectedLayer(),-1);
+        QCOMPARE(p.atlases_[material].color,base[material].color);
+        QCOMPARE(p.atlases_[material].coverage,base[material].coverage);
+        QCOMPARE(p.atlases_[material].confidence,base[material].confidence);
+        p.undoButton_->click();QCOMPARE(p.projections_.size(),1);
+        p.setExternalBusy(true);p.deleteLayer(0);QCOMPARE(p.projections_.size(),1);
+        QVERIFY(!p.findChild<QPushButton *>("aiDeleteLayer")->isEnabled());p.setExternalBusy(false);
+        p.setLayerVisible(0,false);QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        p.deleteLayer(0);QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);QVERIFY(p.projections_.empty());
+        const auto path=storage.filePath("deleted.fornaioai");
+        aiSaveProject(path,{{"projectionBackend","modddif-v1"}},p.atlases_,p.projections_);
+        AiAtlases loaded;QList<QJsonObject> saved;aiLoadProject(path,loaded,saved);QVERIFY(saved.empty());
+        QVERIFY(QFileInfo::exists("samples/single_card.obj"));
+    }
+    void legacyRebuildIsExplicitAtomicAndUndoable() {
+        AiPanel p;QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.resolution_->setCurrentIndex(p.resolution_->findData(1024));p.parity_=false;
+        const auto base=p.atlases_;const auto c=capture(*p.scene_,base,128);
+        AiProjectionOptions options;options.overlay=true;options.recordLayer=true;
+        auto projected=aiProject(*p.scene_,0,base,c,solid(128,qRgb(200,40,20)),c.silhouette,p.selectedMaterials(),false,8,nullptr,options);
+        auto encode=[](const QImage &image){QByteArray bytes;QBuffer buffer(&bytes);buffer.open(QIODevice::WriteOnly);image.save(&buffer,"PNG");return QString::fromLatin1(bytes.toBase64());};
+        QJsonObject record{{"layerId","legacy"},{"camera",aiCameraJson(c.camera)},
+                           {"candidate",encode(solid(128,qRgb(200,40,20)))},{"mask",encode(c.silhouette)},
+                           {"materials",QJsonArray::fromStringList(p.selectedMaterials().values())},
+                           {"blending",QJsonObject{{"mode","overlay"}}},{"uvLayer",projected.layer}};
+        p.projections_={record};p.atlases_=projected.atlases;p.refreshLayers();p.refresh();
+        const auto before=p.atlases_;const int undoCount=p.undo_.size();
+        p.projectionError_="test context unavailable";p.rebuildProjectionLayers();
+        QVERIFY(!p.busy_);QVERIFY(!p.parity_);QCOMPARE(p.atlases_.first().color,before.first().color);
+        p.projectionError_.clear();
+        p.rebuildProjectionLayers();QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        QVERIFY2(p.parity_,qPrintable(p.status_->text()));
+        QCOMPARE(p.projections_[0]["uvLayer"].toObject()["version"].toInt(),2);
+        QCOMPARE(p.undo_.size(),undoCount+1);
+        p.undoButton_->click();QVERIFY(!p.parity_);QCOMPARE(p.atlases_.first().color,before.first().color);
+        QCOMPARE(p.projections_[0]["uvLayer"].toObject()["version"].toInt(),1);
+        p.redoButton_->click();QVERIFY(p.parity_);p.undoButton_->click();
+        p.projections_[0]["candidate"]="invalid";const auto failed=p.projections_;const auto size=p.undo_.size();
+        p.rebuildProjectionLayers();QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        QVERIFY(!p.parity_);QCOMPARE(p.undo_.size(),size);QCOMPARE(p.projections_,failed);
+        QCOMPARE(p.atlases_.first().color,before.first().color);
+        p.projections_[0]=record;p.rebuildProjectionLayers();p.cancelJob();QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        QVERIFY(!p.parity_);QCOMPARE(p.atlases_.first().color,before.first().color);
+    }
+    void parityPreservesOriginalCloudSourceAndLayerEdits() {
+        QTemporaryDir storage;AiPanel p;QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.resolution_->setCurrentIndex(p.resolution_->findData(1024));
+        p.capture_=std::make_shared<AiCapture>(capture(*p.scene_,p.atlases_,128));
+        p.lock_=std::make_shared<AiLock>(aiLockedGuide(*p.capture_));
+        p.candidateSettings_={{"id","original"},{"model","gpt-image-2"},{"camera",aiCameraJson(p.capture_->camera)}};
+        QImage original(256,256,QImage::Format_RGBA8888);original.fill(QColor(200,60,20,128));
+        const auto path=storage.filePath("original.png");QVERIFY(original.save(path));
+        const auto originalBytes=[&]{QFile file(path);file.open(QIODevice::ReadOnly);return file.readAll();}();
+        p.setBusy(true);p.workerEvent({{"event","result"},{"id","original"},{"output",path},{"alignment",1.0}});
+        auto source=QImage::fromData(QByteArray::fromBase64(p.candidateSettings_["sourceImage"].toString().toLatin1()),"PNG");
+        QCOMPARE(source.size(),original.size());QCOMPARE(source.pixelColor(100,100),original.pixelColor(100,100));
+        QCOMPARE(p.candidate_.pixelColor(64,64).alpha(),128);
+        p.project_->click();QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        QCOMPARE(p.projections_.size(),1);QCOMPARE(p.projections_[0]["uvLayer"].toObject()["version"].toInt(),2);
+        const auto baked=p.projections_[0]["uvLayer"];
+        auto changed=p.projections_;auto blend=changed[0]["blending"].toObject();blend["strength"]=.5;changed[0]["blending"]=blend;
+        p.applyLayerEdit(changed,-1,0,"Strength",{});QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        QCOMPARE(p.projections_[0]["uvLayer"],baked);
+        changed=p.projections_;blend=changed[0]["blending"].toObject();blend["mode"]="overlay";changed[0]["blending"]=blend;
+        p.applyLayerEdit(changed,0,0,"Mode",{});QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        QVERIFY2(p.projections_[0]["uvLayer"]!=baked,qPrintable(p.status_->text()));
+        p.deleteLayer(0);QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        QFile unchanged(path);QVERIFY(unchanged.open(QIODevice::ReadOnly));QCOMPARE(unchanged.readAll(),originalBytes);
+    }
+    void deletingLegacyLayerFreezesOriginalStackFirst() {
+        AiPanel p;QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.resolution_->setCurrentIndex(p.resolution_->findData(1024));p.parity_=false;
+        const auto base=p.atlases_;const auto c=capture(*p.scene_,base,128);
+        auto encode=[](const QImage &image){QByteArray data;QBuffer buffer(&data);buffer.open(QIODevice::WriteOnly);image.save(&buffer,"PNG");return QString::fromLatin1(data.toBase64());};
+        auto record=[&](const QString &id,QRgb color){return QJsonObject{
+            {"layerId",id},{"camera",aiCameraJson(c.camera)},{"candidate",encode(solid(128,color))},
+            {"mask",encode(c.silhouette)},{"materials",QJsonArray::fromStringList(p.selectedMaterials().values())},
+            {"blending",QJsonObject{{"mode","overlay"},{"strength",.5},{"feather",.06}}}};};
+        const QList<QJsonObject> records={record("old-red",qRgb(255,0,0)),record("old-blue",qRgb(0,0,255))};
+        const auto frozen=aiPrepareLayers(*p.scene_,0,base,records);
+        const auto expected=aiComposeLayers(base,{frozen[1]});
+        p.projections_=records;p.atlases_=aiComposeLayers(base,frozen);p.refreshLayers();p.refresh();
+        p.deleteLayer(0);QTRY_VERIFY_WITH_TIMEOUT(!p.busy_,10000);
+        QCOMPARE(p.projections_.size(),1);QCOMPARE(p.projections_[0]["uvLayer"],frozen[1]["uvLayer"]);
+        QCOMPARE(p.atlases_.first().color,expected.first().color);
+        QCOMPARE(p.atlases_.first().confidence,expected.first().confidence);
+    }
     void frozenProjectionLayersComposeExactly() {
         const auto s = plane();
         const auto base = aiEmptyAtlases(s, 128);
@@ -2406,12 +2531,14 @@ class AiTests : public QObject {
         QTemporaryDir storage;
         AiPanel p;
         p.model_->setCurrentIndex(p.model_->findData("fibo"));
-        // New panels keep well-seen paint; legacy projects still load their saved mode.
-        QCOMPARE(p.blendMode_->currentData().toString(), QString("lock"));
+        // New projects use independent projection layers; legacy generation remains tested below.
+        QVERIFY(p.parity_);
+        QCOMPARE(p.blendMode_->currentData().toString(), QString("blend"));
         QVERIFY(!p.colorMatch_->isChecked());
         p.installer_.setRoot(storage.path());
         QVERIFY(p.loadMesh("samples/single_card.obj"));
         QVERIFY(!p.generate_->isEnabled());
+        p.parity_ = false; // Preserve coverage of the legacy retained-detail worker protocol.
         for (auto group : p.findChildren<QGroupBox *>())
             if (group->title() == "Local AI engine")
                 group->setChecked(true);
@@ -2516,6 +2643,7 @@ class AiTests : public QObject {
         QVERIFY(p.loadMesh("samples/stacked_cards.fbx"));
         QVERIFY(!p.meshErrors_.empty());
         p.uv_->setCurrentIndex(1);
+        p.parity_ = false; // Exercise old project settings and migration explicitly.
         QVERIFY(p.meshErrors_.empty());
         auto material = p.atlases_.firstKey();
         p.atlases_[material].color.fill(Qt::red);
@@ -2566,6 +2694,7 @@ class AiTests : public QObject {
         AiAtlases legacyAtlases;
         QList<QJsonObject> legacyRecords;
         auto legacy = aiLoadProject(path, legacyAtlases, legacyRecords);
+        legacy.remove("projectionBackend");
         legacy.remove("projectionBehaviorVersion");
         legacy.remove("projectionAngle");
         legacy.remove("projectionFillGaps");
@@ -2590,6 +2719,8 @@ class AiTests : public QObject {
         p.blendMode_->setCurrentIndex(p.blendMode_->findData("overlay")); // repaint semantics
         QVERIFY(p.loadMesh("samples/single_card.obj"));
         p.resolution_->setCurrentIndex(p.resolution_->findData(1024));
+        p.parity_ = false;
+        p.blendMode_->setCurrentIndex(p.blendMode_->findData("overlay"));
         const auto material = p.atlases_.firstKey();
         paintAtlas(p.atlases_[material], qRgb(255, 0, 0));
         const auto coverage = p.atlases_[material].coverage;
@@ -2616,6 +2747,8 @@ class AiTests : public QObject {
         p.blendMode_->setCurrentIndex(p.blendMode_->findData("overlay")); // repaint semantics
         QVERIFY(p.loadMesh("samples/single_card.obj"));
         p.resolution_->setCurrentIndex(p.resolution_->findData(1024));
+        p.parity_ = false;
+        p.blendMode_->setCurrentIndex(p.blendMode_->findData("overlay"));
         const auto material = p.atlases_.firstKey();
         auto project = [&](QRgb color, const QString &id) {
             p.capture_ = std::make_shared<AiCapture>(capture(*p.scene_, p.atlases_, 128));
@@ -2654,6 +2787,8 @@ class AiTests : public QObject {
         AiPanel p;
         p.blendMode_->setCurrentIndex(p.blendMode_->findData("overlay")); // repaint semantics
         QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.parity_ = false;
+        p.blendMode_->setCurrentIndex(p.blendMode_->findData("overlay"));
         auto initial = p.atlases_;
         p.capture_ = std::make_shared<AiCapture>(aiCapture(*p.scene_, p.uv_->currentIndex(), p.atlases_,
                                                            aiCamera(*p.scene_, p.view_->camera(), 128)));
@@ -2684,6 +2819,8 @@ class AiTests : public QObject {
         AiPanel p;
         QVERIFY(p.loadMesh("samples/single_card.obj"));
         p.resolution_->setCurrentIndex(p.resolution_->findData(1024));
+        p.parity_ = false;
+        p.blendMode_->setCurrentIndex(p.blendMode_->findData("blend"));
         const auto material = p.atlases_.firstKey();
         AiAtlases first;
         for (int i = 0; i < 2; ++i) {
@@ -2759,6 +2896,7 @@ class AiTests : public QObject {
         AiAtlases savedAtlases;
         QList<QJsonObject> legacyRecords;
         auto legacySettings = aiLoadProject(project, savedAtlases, legacyRecords);
+        legacySettings.remove("projectionBackend");
         legacySettings.remove("layerBase");
         for (auto &record : legacyRecords) {
             record.remove("uvLayer");
@@ -2799,6 +2937,7 @@ class AiTests : public QObject {
 int main(int argc, char **argv) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication app(argc, argv);
+    const auto projectionCleanup = qScopeGuard([] { aiShutdownProjectionRenderer(); });
     app.setOrganizationName("Fornaio-Tests");
     app.setApplicationName("AI-regressions");
     if (app.arguments().contains("--head-gap-probe")) {

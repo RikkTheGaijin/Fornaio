@@ -37,11 +37,19 @@ class AiPanel : public QWidget {
     std::shared_ptr<const Scene> scene_;
     QString meshPath_, anchor_;
     QString migrationSource_, engineProfile_, enginePath_;
+    QString projectionError_;
     AiAtlases atlases_, layerBase_;
     struct HistoryState {
         AiAtlases atlases;
         QList<QJsonObject> projections;
+        AiAtlases base;
+        bool parity = true;
+        QString isolatedLayer;
+        int selected = -1;
+        QString mode;
     };
+    bool parity_ = true;
+    QString isolatedLayer_;
     QList<HistoryState> undo_, redo_;
     QList<QJsonObject> projections_;
     QCache<QByteArray, AiAtlases> layerFrames_{256 * 1024}; // KiB, bounded across visibility combinations.
@@ -78,6 +86,11 @@ class AiPanel : public QWidget {
     QListWidget *references_, *materials_, *layers_, *viewGrid_;
     QWidget *candidateFrame_, *multiviewBox_;
     QLabel *layersEmpty_;
+    QWidget *layerTools_;
+    QComboBox *layerMode_;
+    QSpinBox *layerStrength_, *layerDepthMargin_;
+    QCheckBox *layerIsolate_;
+    QPushButton *deleteLayer_, *rebuildLayers_;
     QComboBox *uv_, *resolution_, *generationResolution_, *profile_, *atlasChoice_, *display_, *blendMode_;
     QSpinBox *seed_, *brush_, *projectionStrength_, *projectionFeather_, *angleFalloff_, *continuity_,
         *projectionAngle_, *cameraFov_;
@@ -97,6 +110,17 @@ class AiPanel : public QWidget {
     void updatePreview();
     void refreshLayers();
     void setLayerVisible(int index, bool visible);
+    int selectedLayer() const;
+    HistoryState historyState() const;
+    void restoreHistory(const HistoryState &);
+    void refreshLayerTools();
+    void applyLayerEdit(QList<QJsonObject>, int rebakeIndex, int selected,
+                        const QString &message, const QString &isolation, bool rebuild = false);
+    void deleteLayer(int index);
+    void moveLayer(int index, int offset);
+    void replaceLayerImage(int index);
+    void editLayerMask(int index, bool uv);
+    void rebuildProjectionLayers();
     void setBusy(bool);
     QSet<QString> selectedMaterials() const;
     QStringList referencePaths() const;
