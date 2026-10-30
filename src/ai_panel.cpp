@@ -1,16 +1,18 @@
 #include "ai_panel.h"
 #include "ai_layers.h"
+#include "ai_smart_fill.h"
 #include "scroll_controls.h"
 #include "transfer.h"
 #include <QApplication>
+#include <QBitArray>
 #include <QBuffer>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDesktopServices>
-#include <QDir>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -42,8 +44,8 @@
 #include <QStyledItemDelegate>
 #include <QTabBar>
 #include <QTabWidget>
-#include <QVBoxLayout>
 #include <QUuid>
+#include <QVBoxLayout>
 #include <algorithm>
 
 namespace {
@@ -101,25 +103,61 @@ QString imageData(const QImage &im) {
     im.save(&buffer, "PNG");
     return QString::fromLatin1(bytes.toBase64());
 }
-QByteArray compositionKey(const AiAtlases &base, const QList<QJsonObject> &records,
-                          bool parity, const QString &isolation) {
+QByteArray compositionKey(const AiAtlases &base, const QList<QJsonObject> &records, bool parity,
+                          const QString &isolation) {
     QByteArray key = parity ? "parity:" : "legacy:";
     key += isolation.toUtf8();
     for (auto it = base.begin(); it != base.end(); ++it)
         key += ':' + it.key().toUtf8() + ':' + QByteArray::number(it->color.cacheKey()) + ':' +
-               QByteArray::number(it->coverage.cacheKey()) + ':' + QByteArray::number(it->confidence.cacheKey());
+               QByteArray::number(it->coverage.cacheKey()) + ':' +
+               QByteArray::number(it->confidence.cacheKey());
     for (const auto &record : records)
-        key += ':' + record["layerId"].toString().toUtf8() +
-               (record["visible"].toBool(true) ? "+" : "-") +
+        key += ':' + record["layerId"].toString().toUtf8() + ':' +
+               record["contentRevision"].toString().toUtf8() + (record["visible"].toBool(true) ? "+" : "-") +
                QJsonDocument(record["blending"].toObject()).toJson(QJsonDocument::Compact);
     return QCryptographicHash::hash(key, QCryptographicHash::Sha256);
 }
 int compositionCost(const AiAtlases &atlases) {
     qint64 bytes = 0;
     for (const auto &atlas : atlases)
-        bytes += atlas.color.sizeInBytes() + atlas.coverage.sizeInBytes() +
-                 atlas.confidence.sizeInBytes() + atlas.projectionWeight.size() * sizeof(float);
+        bytes += atlas.color.sizeInBytes() + atlas.coverage.sizeInBytes() + atlas.confidence.sizeInBytes() +
+                 atlas.projectionWeight.size() * sizeof(float);
     return int((bytes + 1023) / 1024);
+}
+bool needsLegacyLayerPreparation(const QList<QJsonObject> &records) {
+    return std::any_of(records.cbegin(), records.cend(), [](const QJsonObject &record) {
+        return !aiIsRepairLayer(record) && record["uvLayer"].toObject()["version"].toInt() != 1;
+    });
+}
+bool layerContentChanged(QJsonObject before, QJsonObject after) {
+    // Nested images/UV blocks retain Qt's shared JSON storage when only a
+    // visibility or strength value changes. Compare that content directly;
+    // never serialize the multi-megabyte assets on a composition cache hit.
+    for (const auto &key : {"visible", "blending", "contentRevision"}) {
+        before.remove(key);
+        after.remove(key);
+    }
+    return before != after;
+}
+void requireUnchangedOrdinaryPaint(const AiAtlases &before, const AiAtlases &after,
+                                   std::atomic_bool *cancel = nullptr) {
+    for (auto it = before.cbegin(); it != before.cend(); ++it) {
+        if (!after.contains(it.key()) || after[it.key()].color.size() != it->color.size())
+            throw std::runtime_error("Smart fill atlas dimensions changed");
+        const auto &result = after[it.key()];
+        for (int y = 0; y < it->color.height(); ++y) {
+            if (cancel && cancel->load())
+                throw std::runtime_error("Cancelled");
+            for (int x = 0; x < it->color.width(); ++x) {
+                if (!it->coverage.constScanLine(y)[x] ||
+                    (!it->repair.isNull() && it->repair.constScanLine(y)[x]))
+                    continue;
+                if ((it->color.pixel(x, y) & 0x00ffffff) != (result.color.pixel(x, y) & 0x00ffffff))
+                    throw std::runtime_error("Saved painted pixels could not be reconstructed exactly. Smart "
+                                             "fill was not applied");
+            }
+        }
+    }
 }
 void atomicImage(const QImage &im, const QString &path) {
     QSaveFile file(path);
@@ -170,6 +208,8 @@ class AiMaskCanvas : public QWidget {
     int brush = 24;
     bool editable = true;
     bool outline = false;
+    bool targets = false, regions = false, maskVisible = true;
+    QImage eligibility;
     QImage silhouette;
     std::function<void()> maskChanged;
     AiMaskCanvas() {
@@ -205,9 +245,11 @@ class AiMaskCanvas : public QWidget {
         for (int y = 0; y < mask.height(); ++y) {
             auto row = reinterpret_cast<QRgb *>(overlay.scanLine(y));
             for (int x = 0; x < mask.width(); ++x)
-                row[x] = qRgba(255, 60, 60, (255 - qGray(mask.pixel(x, y))) / 2);
+                row[x] = targets ? qRgba(40, 255, 180, qGray(mask.pixel(x, y)) / 2)
+                                 : qRgba(255, 60, 60, (255 - qGray(mask.pixel(x, y))) / 2);
         }
-        p.drawImage(r, overlay);
+        if (maskVisible)
+            p.drawImage(r, overlay);
         if (outline && !silhouette.isNull()) {
             QImage edges(silhouette.size(), QImage::Format_ARGB32);
             edges.fill(Qt::transparent);
@@ -229,6 +271,36 @@ class AiMaskCanvas : public QWidget {
         if (!r.contains(e->position()))
             return;
         QPointF point = (e->position() - r.topLeft()) * (image.width() / r.width());
+        if (regions && !eligibility.isNull()) {
+            if (e->type() != QEvent::MouseButtonPress)
+                return;
+            const int px = std::clamp(int(point.x()), 0, mask.width() - 1);
+            const int py = std::clamp(int(point.y()), 0, mask.height() - 1);
+            if (qGray(eligibility.pixel(px, py)) < 128)
+                return;
+            const QRgb color = e->buttons() & Qt::RightButton ? qRgb(255, 255, 255) : qRgb(0, 0, 0);
+            QBitArray visited(mask.width() * mask.height());
+            QVector<QPoint> queue{QPoint(px, py)};
+            visited.setBit(py * mask.width() + px);
+            for (qsizetype i = 0; i < queue.size(); ++i) {
+                const QPoint p = queue[i];
+                mask.setPixel(p, color);
+                for (const QPoint delta : {QPoint(-1, 0), QPoint(1, 0), QPoint(0, -1), QPoint(0, 1)}) {
+                    const QPoint next = p + delta;
+                    if (!mask.rect().contains(next))
+                        continue;
+                    const int index = next.y() * mask.width() + next.x();
+                    if (!visited.testBit(index) && qGray(eligibility.pixel(next)) >= 128) {
+                        visited.setBit(index);
+                        queue.append(next);
+                    }
+                }
+            }
+            update();
+            if (maskChanged)
+                maskChanged();
+            return;
+        }
         QPainter p(&mask);
         p.setPen(Qt::NoPen);
         p.setBrush(e->buttons() & Qt::RightButton ? Qt::white : Qt::black);
@@ -298,8 +370,9 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     hfToken_->setObjectName("aiHfToken");
     hfToken_->setEchoMode(QLineEdit::Password);
     hfToken_->setPlaceholderText("Hugging Face token (optional; HF_TOKEN or the HF CLI login is used)");
-    hfToken_->setToolTip("Fibo is gated: accept its license on huggingface.co/briaai/Fibo-2.0-edit-turbo first. "
-                         "The token is used for this download only and is not saved.");
+    hfToken_->setToolTip(
+        "Fibo is gated: accept its license on huggingface.co/briaai/Fibo-2.0-edit-turbo first. "
+        "The token is used for this download only and is not saved.");
     setupLayout->addWidget(hfToken_);
     install_ = button(setupLayout, "Download & Enable AI Texturing", [this] { beginInstall(); });
     install_->setObjectName("aiInstall");
@@ -439,7 +512,8 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     viewGrid_->setMovement(QListView::Static);
     viewGrid_->setMinimumHeight(240);
     viewGrid_->setContextMenuPolicy(Qt::CustomContextMenu);
-    viewGrid_->setToolTip("Generated in this order. Double-click to look through a view; right-click to remove it.");
+    viewGrid_->setToolTip(
+        "Generated in this order. Double-click to look through a view; right-click to remove it.");
     multiviewLayout->addWidget(viewGrid_);
     generationLayout->addWidget(multiviewBox_);
     multiviewBox_->hide();
@@ -595,7 +669,8 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     blendMode_->setCurrentIndex(blendMode_->findData("blend"));
     blendMode_->setToolTip(
         "Keep existing paint: paint an earlier view saw well is locked, and this view only paints around it "
-        "(uncovered or grazing areas). Camera projection paints over existing texture with soft camera falloff. "
+        "(uncovered or grazing areas). Camera projection paints over existing texture with soft camera "
+        "falloff. "
         "Quality blending can keep stronger old projections. Fill preserves all existing paint.");
     blendForm->addRow("Mode", blendMode_);
     projectionStrength_ = new ScrollSpinBox;
@@ -636,8 +711,9 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     coverAll_ = new QCheckBox("Paint every visible face");
     coverAll_->setObjectName("aiCoverAll");
     coverAll_->setChecked(true);
-    coverAll_->setToolTip("Untextured surfaces beyond the maximum angle still receive this view's paint, at low "
-                          "confidence, so a later camera-facing view replaces them. Existing paint keeps the limit.");
+    coverAll_->setToolTip(
+        "Untextured surfaces beyond the maximum angle still receive this view's paint, at low "
+        "confidence, so a later camera-facing view replaces them. Existing paint keeps the limit.");
     blendForm->addRow(coverAll_);
     colorMatch_ = new QCheckBox("Match colors in overlap");
     colorMatch_->setChecked(false);
@@ -732,8 +808,9 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     orthographic_ = new QCheckBox("Orthographic");
     orthographic_->setObjectName("aiOrthographic");
     orthographic_->setChecked(true);
-    orthographic_->setToolTip("Project without perspective, as a parallel view. Generation frames the visible "
-                              "mesh bounds to use the full image resolution.");
+    orthographic_->setToolTip(
+        "Project without perspective, as a parallel view. Generation frames the visible "
+        "mesh bounds to use the full image resolution.");
     lensBar->addWidget(orthographic_);
     auto fovLabel = new QLabel("FOV");
     fovLabel->setObjectName("aiCameraFovLabel");
@@ -799,7 +876,7 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
         if (index == 2)
             updatePreview();
     });
-    auto layersPanel = new QGroupBox("Projection layers");
+    auto layersPanel = new QGroupBox("Texture layers");
     layersPanel->setObjectName("aiLayersPanel");
     layersPanel->setMinimumWidth(210);
     layersPanel->setMaximumWidth(330);
@@ -837,7 +914,7 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     layerToolsLayout->addLayout(layerForm);
     auto applySettings = button(layerToolsLayout, "Apply layer settings", [this] {
         const int index = selectedLayer();
-        if (index < 0 || !parity_)
+        if (index < 0 || !parity_ || aiIsRepairLayer(projections_[index]))
             return;
         auto records = projections_;
         auto blend = records[index]["blending"].toObject();
@@ -872,17 +949,20 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     auto maskButtons = new QHBoxLayout;
     auto cameraMask = new QPushButton("Camera mask");
     auto uvMask = new QPushButton("UV mask");
+    cameraMask->setObjectName("aiLayerCameraMask");
     maskButtons->addWidget(cameraMask);
     maskButtons->addWidget(uvMask);
     layerToolsLayout->addLayout(maskButtons);
     connect(cameraMask, &QPushButton::clicked, this, [this] { editLayerMask(selectedLayer(), false); });
     connect(uvMask, &QPushButton::clicked, this, [this] { editLayerMask(selectedLayer(), true); });
-    button(layerToolsLayout, "Replace image...", [this] { replaceLayerImage(selectedLayer()); });
+    button(layerToolsLayout, "Replace image...", [this] {
+        replaceLayerImage(selectedLayer());
+    })->setObjectName("aiLayerReplaceImage");
     button(layerToolsLayout, "Go to captured camera", [this] {
         const int index = selectedLayer();
-        if (index >= 0)
+        if (index >= 0 && !aiIsRepairLayer(projections_[index]))
             view_->setCamera(aiCameraFromJson(projections_[index]["camera"].toObject()).orbit);
-    });
+    })->setObjectName("aiLayerCapturedCamera");
     auto layerToolScroll = new QScrollArea;
     layerToolScroll->setObjectName("aiLayerControlsScroll");
     layerToolScroll->setWidgetResizable(true);
@@ -897,7 +977,8 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     deleteLayer_->setObjectName("aiDeleteLayer");
     rebuildLayers_ = button(layerLayout, "Rebuild projection layers", [this] { rebuildProjectionLayers(); });
     rebuildLayers_->setObjectName("aiRebuildLayers");
-    rebuildLayers_->setToolTip("Rebuild every saved view using the corrected projection pipeline. No AI generation. Undo restores the previous stack.");
+    rebuildLayers_->setToolTip("Rebuild every saved view using the corrected projection pipeline. No AI "
+                               "generation. Undo restores the previous stack.");
     connect(layers_, &QListWidget::currentRowChanged, this, [this] { refreshLayerTools(); });
     split->addWidget(layersPanel);
     split->setSizes({350, 700, 240});
@@ -912,8 +993,11 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
         const int index = item->data(Qt::UserRole).toInt();
         QMenu menu;
         auto look = menu.addAction("Go to this layer's camera");
-        auto regenerate = menu.addAction("Regenerate with a new seed");
-        regenerate->setEnabled(modelReady() && !externalBusy_);
+        const bool repair = aiIsRepairLayer(projections_[index]);
+        look->setEnabled(!repair);
+        auto regenerate = menu.addAction(repair ? "Regenerate Smart fill..." : "Regenerate with a new seed");
+        regenerate->setEnabled((repair ? cloud_.backend() != AiCloudImage::Backend::None : modelReady()) &&
+                               !externalBusy_);
         auto remove = menu.addAction("Delete layer");
         remove->setEnabled(!externalBusy_);
         auto chosen = menu.exec(layers_->viewport()->mapToGlobal(point));
@@ -938,6 +1022,12 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     connect(cancelButton_, &QPushButton::clicked, this, &AiPanel::cancelJob);
     // Keep acceptance reachable while the generation panel is scrolled or the full-size image is open.
     bar->addWidget(project_);
+    smartFill_ = new QPushButton("Smart fill...");
+    smartFill_->setObjectName("aiSmartFill");
+    smartFill_->setToolTip(
+        "Repair missing paint inside UV islands. Accepted painted pixels are preserved exactly.");
+    connect(smartFill_, &QPushButton::clicked, this, &AiPanel::startSmartFill);
+    bar->addWidget(smartFill_);
     export_ = new QPushButton("Export base colors…");
     bar->addWidget(export_);
     connect(export_, &QPushButton::clicked, this, &AiPanel::exportTextures);
@@ -970,6 +1060,7 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
             fail(e);
     });
     connect(&installer_, &AiInstaller::progress, this, [this](qint64 n, qint64 total, const QString &s) {
+        progress_->setRange(0, 1000);
         progress_->setValue(total ? int(double(n) / total * 1000) : 0);
         status_->setText(s);
     });
@@ -1063,6 +1154,8 @@ void AiPanel::refresh() {
     project_->setEnabled(idle && !externalBusy_ && scene_ && meshErrors_.empty() && capture_ &&
                          !candidate_.isNull() && !selectedMaterials().empty() &&
                          projectionStrength_->value() > 0);
+    smartFill_->setEnabled(idle && !externalBusy_ && scene_ && meshErrors_.empty() &&
+                           !selectedMaterials().empty());
     undoButton_->setEnabled(idle && !undo_.empty());
     redoButton_->setEnabled(idle && !redo_.empty());
     export_->setEnabled(idle && !projections_.empty() && !selectedMaterials().empty());
@@ -1086,6 +1179,8 @@ void AiPanel::invalidate() {
     capture_.reset();
     candidate_ = QImage();
     candidateRetention_ = {};
+    regenerateLayerId_.clear();
+    regenerateIndex_ = -1;
     canvas_->set({}, {});
     sideCanvas_->set({}, {});
     canvas_->silhouette = sideCanvas_->silhouette = {};
@@ -1101,7 +1196,8 @@ void AiPanel::resetAtlases() {
         blendMode_->setCurrentIndex(blendMode_->findData("blend"));
         layerFrames_.clear();
         layerDecoded_.clear();
-        meshErrors_ = validateAiMesh(*scene_, uv_->currentIndex());
+        QStringList warnings;
+        meshErrors_ = validateAiMesh(*scene_, uv_->currentIndex(), &warnings);
         if (!meshErrors_.empty()) {
             atlases_.clear();
             undo_.clear();
@@ -1117,10 +1213,12 @@ void AiPanel::resetAtlases() {
         }
         atlases_ = aiEmptyAtlases(*scene_, resolution_->currentData().toInt());
         layerBase_ = atlases_;
-        meshInfo_->setText(QString("%1\n%2 triangles · %3 materials")
-                               .arg(QFileInfo(meshPath_).fileName())
-                               .arg(scene_->tris.size())
-                               .arg(atlases_.size()));
+        meshInfo_->setText((QStringList{QString("%1\n%2 triangles · %3 materials")
+                                            .arg(QFileInfo(meshPath_).fileName())
+                                            .arg(scene_->tris.size())
+                                            .arg(atlases_.size())} +
+                            warnings)
+                               .join('\n'));
         undo_.clear();
         redo_.clear();
         projections_.clear();
@@ -1222,12 +1320,17 @@ void AiPanel::refreshLayers() {
         if (record["layerId"].toString().isEmpty() || identities.contains(record["layerId"].toString()))
             record["layerId"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
         identities.insert(record["layerId"].toString());
+        if (record["contentRevision"].toString().isEmpty())
+            record["contentRevision"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
     }
+    reindexRegenerationTarget();
     int frontLayer = -1; // The first visible layer is the front for view-aware generation.
     for (int j = 0; j < projections_.size() && frontLayer < 0; ++j)
-        if (projections_[j]["visible"].toBool(true))
+        if (!aiIsRepairLayer(projections_[j]) && projections_[j]["visible"].toBool(true))
             frontLayer = j;
     auto title = [frontLayer](int index, const QJsonObject &record) {
+        if (aiIsRepairLayer(record))
+            return QString("UV repair %1\nSmart fill · fallback paint").arg(index + 1);
         const auto camera = record["camera"].toObject();
         return QString("Projection %1\n%2° yaw · %3° pitch")
                    .arg(index + 1)
@@ -1262,23 +1365,27 @@ void AiPanel::refreshLayers() {
             QImage::fromData(QByteArray::fromBase64(record["candidate"].toString().toLatin1()), "PNG");
         if (!thumbnail.isNull())
             thumbnail = thumbnail.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        auto item = new QListWidgetItem(QIcon(QPixmap::fromImage(thumbnail)),
-                                        title(i, record),
-                                        layers_);
+        auto item = new QListWidgetItem(QIcon(QPixmap::fromImage(thumbnail)), title(i, record), layers_);
         item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsUserCheckable);
         item->setData(Qt::UserRole, i);
         item->setData(Qt::UserRole + 1, record["layerId"].toString());
         item->setData(Qt::UserRole + 2, record["candidate"].toString());
         item->setCheckState(record["visible"].toBool(true) ? Qt::Checked : Qt::Unchecked);
         item->setSizeHint(QSize(200, 76));
-        item->setToolTip("Toggle visibility in the composed texture. Newest projection is at the top. Right-click to "
-                         "regenerate, delete, or look through its camera. The first visible layer is the front.\n" +
-                         record["prompt"].toString());
+        item->setToolTip(
+            aiIsRepairLayer(record)
+                ? "UV repair layer. Camera projections supersede repaired paint. Right-click to regenerate "
+                  "or delete."
+                : "Toggle visibility in the composed texture. Newest projection is at the top. Right-click "
+                  "to "
+                  "regenerate, delete, or look through its camera. The first visible layer is the front.\n" +
+                      record["prompt"].toString());
         if (!record["visible"].toBool(true))
             item->setForeground(QColor("#7e909e"));
     }
     if (!projections_.empty())
-        layers_->setCurrentRow(projections_.size() - 1 - std::clamp(selected, 0, int(projections_.size()) - 1));
+        layers_->setCurrentRow(projections_.size() - 1 -
+                               std::clamp(selected, 0, int(projections_.size()) - 1));
     refreshLayerTools();
 }
 void AiPanel::setLayerVisible(int index, bool visible) {
@@ -1295,9 +1402,16 @@ int AiPanel::selectedLayer() const {
     return item ? item->data(Qt::UserRole).toInt() : -1;
 }
 AiPanel::HistoryState AiPanel::historyState() const {
-    return {atlases_, projections_, layerBase_, parity_, isolatedLayer_, selectedLayer(), blendMode_->currentData().toString()};
+    return {atlases_,
+            projections_,
+            layerBase_,
+            parity_,
+            isolatedLayer_,
+            selectedLayer(),
+            blendMode_->currentData().toString()};
 }
 void AiPanel::restoreHistory(const HistoryState &state) {
+    rememberRegenerationTarget();
     atlases_ = state.atlases;
     projections_ = state.projections;
     layerBase_ = state.base;
@@ -1317,41 +1431,69 @@ void AiPanel::restoreHistory(const HistoryState &state) {
 void AiPanel::refreshLayerTools() {
     const int index = selectedLayer();
     const bool idle = !busy_ && !externalBusy_ && !installer_.busy();
+    const bool repair = index >= 0 && aiIsRepairLayer(projections_[index]);
     layerTools_->setEnabled(idle && index >= 0);
     deleteLayer_->setEnabled(idle && index >= 0);
     rebuildLayers_->setEnabled(idle && scene_ && !projections_.empty());
-    layerMode_->setEnabled(parity_);
-    layerStrength_->setEnabled(parity_);
-    layerDepthMargin_->setEnabled(parity_);
+    layerMode_->setEnabled(parity_ && !repair);
+    layerStrength_->setEnabled(parity_ && !repair);
+    layerDepthMargin_->setEnabled(parity_ && !repair);
     if (auto apply = findChild<QPushButton *>("aiApplyLayerSettings"))
-        apply->setEnabled(parity_);
+        apply->setEnabled(parity_ && !repair);
+    for (const auto &name : {"aiLayerCameraMask", "aiLayerReplaceImage", "aiLayerCapturedCamera"})
+        if (auto control = findChild<QPushButton *>(name))
+            control->setEnabled(!repair);
     const QSignalBlocker a(layerMode_), b(layerStrength_), c(layerDepthMargin_), d(layerIsolate_);
     if (index >= 0) {
         const auto blend = projections_[index]["blending"].toObject();
         layerMode_->setCurrentIndex(blend["mode"].toString() == "overlay" ? 1 : 0);
         layerStrength_->setValue(qRound(blend["strength"].toDouble(1) * 100));
         layerDepthMargin_->setValue(blend["depthMargin"].toInt(2));
-        layerIsolate_->setChecked(projections_[index]["layerId"].toString() == isolatedLayer_ && !isolatedLayer_.isEmpty());
+        layerIsolate_->setChecked(projections_[index]["layerId"].toString() == isolatedLayer_ &&
+                                  !isolatedLayer_.isEmpty());
     } else
         layerIsolate_->setChecked(false);
     for (auto widget : {static_cast<QWidget *>(projectionFeather_), static_cast<QWidget *>(angleFalloff_),
                         static_cast<QWidget *>(projectionAngle_), static_cast<QWidget *>(fillGaps_),
                         static_cast<QWidget *>(coverAll_), static_cast<QWidget *>(colorMatch_)})
         widget->setEnabled(!parity_);
-    blendMode_->setToolTip(parity_ ? "New projection layers use Blend or Overlay. Legacy paint-protection modes require a legacy project."
-                                  : "Legacy projection behavior. Rebuild projection layers to use the corrected pipeline.");
+    blendMode_->setToolTip(
+        parity_ ? "New projection layers use Blend or Overlay. Legacy paint-protection modes require a "
+                  "legacy project."
+                : "Legacy projection behavior. Rebuild projection layers to use the corrected pipeline.");
     auto model = qobject_cast<QStandardItemModel *>(blendMode_->model());
     if (model)
         for (int i = 0; i < blendMode_->count(); ++i)
-            model->item(i)->setEnabled(!parity_ || blendMode_->itemData(i) == "blend" || blendMode_->itemData(i) == "overlay");
+            model->item(i)->setEnabled(!parity_ || blendMode_->itemData(i) == "blend" ||
+                                       blendMode_->itemData(i) == "overlay");
     blendMode_->setItemText(blendMode_->findData("blend"), parity_ ? "Blend" : "Blend by camera quality");
-    blendMode_->setItemText(blendMode_->findData("overlay"), parity_ ? "Overlay" : "Camera projection (repaint)");
+    blendMode_->setItemText(blendMode_->findData("overlay"),
+                            parity_ ? "Overlay" : "Camera projection (repaint)");
 }
 void AiPanel::applyLayerEdit(QList<QJsonObject> records, int rebakeIndex, int selected,
                              const QString &message, const QString &isolation, bool rebuild) {
     if (busy_ || externalBusy_ || installer_.busy() || setupLease_ || !scene_)
         return;
-    if ((rebuild || (parity_ && rebakeIndex >= 0)) && !projectionError_.isEmpty()) {
+    rememberRegenerationTarget();
+    for (auto &record : projections_)
+        if (record["contentRevision"].toString().isEmpty())
+            record["contentRevision"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QMap<QString, QJsonObject> previousRecords;
+    for (const auto &record : projections_)
+        previousRecords[record["layerId"].toString()] = record;
+    bool changedContent = false;
+    for (int i = 0; i < records.size(); ++i) {
+        auto &record = records[i];
+        const auto found = previousRecords.constFind(record["layerId"].toString());
+        if (rebuild || rebakeIndex == i || found == previousRecords.cend() ||
+            layerContentChanged(found.value(), record)) {
+            record["contentRevision"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            changedContent = true;
+        } else
+            record["contentRevision"] = found.value()["contentRevision"];
+    }
+    if ((rebuild || (parity_ && rebakeIndex >= 0 && !aiIsRepairLayer(records[rebakeIndex]))) &&
+        !projectionError_.isEmpty()) {
         status_->setText("Projection renderer unavailable: " + projectionError_ +
                          ". Accepted projections remain unchanged.");
         return;
@@ -1363,7 +1505,7 @@ void AiPanel::applyLayerEdit(QList<QJsonObject> records, int rebakeIndex, int se
     const auto base = layerBase_;
     const bool parity = parity_ || rebuild;
     const int uv = uv_->currentIndex(), resolution = resolution_->currentData().toInt();
-    const bool contentChange = rebuild || rebakeIndex >= 0;
+    const bool contentChange = rebuild || rebakeIndex >= 0 || changedContent;
     if (contentChange) {
         layerFrames_.clear();
         layerDecoded_.clear();
@@ -1391,16 +1533,17 @@ void AiPanel::applyLayerEdit(QList<QJsonObject> records, int rebakeIndex, int se
     cancel_ = false;
     setBusy(true);
     status_->setText(rebuild ? "Rebuilding every saved projection layer. No AI generation is needed..."
-                            : "Updating projection layers...");
-    native_ = std::thread([this, previous, scene, base, records, parity, uv, resolution,
-                           rebakeIndex, selected, message, isolation, rebuild]() mutable {
+                             : "Updating projection layers...");
+    native_ = std::thread([this, previous, scene, base, records, parity, uv, resolution, rebakeIndex,
+                           selected, message, isolation, rebuild]() mutable {
         try {
             if (rebuild)
                 records = aiRebuildProjectionLayers(*scene, uv, resolution, records, &cancel_);
-            else if (parity && rebakeIndex >= 0)
-                records[rebakeIndex] = aiBakeProjectionLayer(*scene, uv, resolution, records[rebakeIndex], &cancel_);
+            else if (rebakeIndex >= 0 && (parity || aiIsRepairLayer(records[rebakeIndex])))
+                records[rebakeIndex] =
+                    aiBakeProjectionLayer(*scene, uv, resolution, records[rebakeIndex], &cancel_);
             else if (!parity && std::any_of(records.begin(), records.end(), [](const QJsonObject &r) {
-                         return r["uvLayer"].toObject()["version"].toInt() != 1;
+                         return !aiIsRepairLayer(r) && r["uvLayer"].toObject()["version"].toInt() != 1;
                      })) {
                 // Legacy paint operations depend on the stack below them. Freeze
                 // the original order before applying visibility, order or deletion.
@@ -1409,7 +1552,7 @@ void AiPanel::applyLayerEdit(QList<QJsonObject> records, int rebakeIndex, int se
                 for (const auto &record : frozen)
                     layersById.insert(record["layerId"].toString(), record["uvLayer"].toObject());
                 for (auto &record : records) {
-                    if (record["uvLayer"].toObject()["version"].toInt() == 1)
+                    if (aiIsRepairLayer(record) || record["uvLayer"].toObject()["version"].toInt() == 1)
                         continue;
                     const auto id = record["layerId"].toString();
                     if (id.isEmpty() || !layersById.contains(id))
@@ -1421,8 +1564,7 @@ void AiPanel::applyLayerEdit(QList<QJsonObject> records, int rebakeIndex, int se
             if (!isolation.isEmpty())
                 for (auto &record : effective)
                     record["visible"] = record["layerId"].toString() == isolation;
-            auto composed = parity ? aiComposeParityLayers(base, effective, &cancel_)
-                                   : aiComposeLayers(base, effective, &cancel_, &layerDecoded_);
+            auto composed = aiComposeLayerStack(base, effective, parity, &cancel_, &layerDecoded_);
             QMetaObject::invokeMethod(
                 this,
                 [this, previous, records, composed, parity, isolation, selected, message, rebuild] {
@@ -1468,11 +1610,14 @@ void AiPanel::deleteLayer(int index) {
     const QString deleted = records[index]["layerId"].toString();
     records.removeAt(index);
     applyLayerEdit(records, -1, records.empty() ? -1 : std::min(index, int(records.size()) - 1),
-                   "Layer deleted. Undo restores it.", isolatedLayer_ == deleted ? QString() : isolatedLayer_);
+                   "Layer deleted. Undo restores it.",
+                   isolatedLayer_ == deleted ? QString() : isolatedLayer_);
 }
 void AiPanel::moveLayer(int index, int offset) {
-    if (busy_ || externalBusy_ || index < 0 || index >= projections_.size() ||
-        index + offset < 0 || index + offset >= projections_.size())
+    if (busy_ || externalBusy_ || index < 0 || index >= projections_.size() || index + offset < 0 ||
+        index + offset >= projections_.size())
+        return;
+    if (aiIsRepairLayer(projections_[index]) != aiIsRepairLayer(projections_[index + offset]))
         return;
     auto records = projections_;
     records.move(index, index + offset);
@@ -1481,12 +1626,14 @@ void AiPanel::moveLayer(int index, int offset) {
 void AiPanel::replaceLayerImage(int index) {
     if (busy_ || externalBusy_ || index < 0 || index >= projections_.size())
         return;
+    if (aiIsRepairLayer(projections_[index]))
+        return;
     if (!parity_) {
         status_->setText("Rebuild projection layers before replacing a layer image.");
         return;
     }
     const QString path = QFileDialog::getOpenFileName(this, "Replace layer image", {},
-                                                     "Images (*.png *.jpg *.jpeg *.tif *.tiff *.tga)");
+                                                      "Images (*.png *.jpg *.jpeg *.tif *.tiff *.tga)");
     if (path.isEmpty())
         return;
     QString error;
@@ -1497,27 +1644,48 @@ void AiPanel::replaceLayerImage(int index) {
     }
     auto records = projections_;
     records[index]["sourceImage"] = imageData(image);
-    records[index]["candidate"] = imageData(image.scaled(
-        aiCameraFromJson(records[index]["camera"].toObject()).size,
-        aiCameraFromJson(records[index]["camera"].toObject()).size,
-        Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
-    applyLayerEdit(records, index, index, "Layer image replaced. Undo restores the previous image.", isolatedLayer_);
+    records[index]["candidate"] =
+        imageData(image.scaled(aiCameraFromJson(records[index]["camera"].toObject()).size,
+                               aiCameraFromJson(records[index]["camera"].toObject()).size,
+                               Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    applyLayerEdit(records, index, index, "Layer image replaced. Undo restores the previous image.",
+                   isolatedLayer_);
 }
 void AiPanel::editLayerMask(int index, bool uv) {
     if (busy_ || externalBusy_ || index < 0 || index >= projections_.size())
         return;
-    if (!parity_) {
+    const bool repair = aiIsRepairLayer(projections_[index]);
+    if (repair && !uv)
+        return;
+    if (!parity_ && !repair) {
         status_->setText("Rebuild projection layers before editing a saved layer mask.");
         return;
     }
     const auto record = projections_[index];
+    if (repair) {
+        const QString material = atlasChoice_->currentText();
+        bool represented = false;
+        for (const auto &entry : record["uvLayer"].toObject()["materials"].toArray())
+            represented |= entry.toObject()["material"].toString() == material;
+        if (!represented) {
+            status_->setText("This UV repair layer has no paint for the selected material. Select one of its "
+                             "materials in the UV texture view.");
+            return;
+        }
+    }
     const QString key = uv ? "uvMask" : "userMask";
-    QImage image = uv ? atlases_.value(atlasChoice_->currentText()).color
-                     : QImage::fromData(QByteArray::fromBase64(
-                           record["sourceImage"].toString(record["candidate"].toString()).toLatin1()), "PNG");
+    QImage image =
+        uv ? atlases_.value(atlasChoice_->currentText()).color
+           : QImage::fromData(QByteArray::fromBase64(
+                                  record["sourceImage"].toString(record["candidate"].toString()).toLatin1()),
+                              "PNG");
     if (image.isNull())
         return;
-    QImage mask = QImage::fromData(QByteArray::fromBase64(record[key].toString().toLatin1()), "PNG");
+    const QString material = atlasChoice_->currentText();
+    QImage mask = QImage::fromData(
+        QByteArray::fromBase64(
+            (repair ? record["uvMasks"].toObject()[material] : record[key]).toString().toLatin1()),
+        "PNG");
     if (mask.isNull() && !uv)
         mask = QImage::fromData(QByteArray::fromBase64(record["mask"].toString().toLatin1()), "PNG");
     if (mask.isNull()) {
@@ -1544,8 +1712,13 @@ void AiPanel::editLayerMask(int index, bool uv) {
     if (dialog.exec() != QDialog::Accepted)
         return;
     auto records = projections_;
-    records[index][key] = imageData(editor->mask);
-    if (!uv)
+    if (repair) {
+        auto masks = record["uvMasks"].toObject();
+        masks[material] = imageData(editor->mask);
+        records[index]["uvMasks"] = masks;
+    } else
+        records[index][key] = imageData(editor->mask);
+    if (!uv && !repair)
         records[index]["mask"] = records[index][key];
     applyLayerEdit(records, index, index, "Layer mask updated.", isolatedLayer_);
 }
@@ -1556,10 +1729,775 @@ void AiPanel::rebuildProjectionLayers() {
                    "Projection layers rebuilt. Saved images were reused; Undo restores the previous stack.",
                    isolatedLayer_, true);
 }
+void AiPanel::startSmartFill() {
+    if (busy_ || externalBusy_ || installer_.busy() || !scene_ || selectedMaterials().empty())
+        return;
+    smartFillPreviewDeferred_ = false;
+    if (!pendingSmartFill_.empty())
+        showSmartFill();
+    else
+        prepareSmartFill();
+}
+void AiPanel::prepareSmartFill(const QString &replaceLayer) {
+    if (busy_ || externalBusy_ || installer_.busy() || !scene_ || selectedMaterials().empty())
+        return;
+    if (native_.joinable())
+        native_.join();
+    engine_.stop();
+    cancel_ = false;
+    smartFillActive_ = true;
+    smartFillPhase_ = SmartFillPhase::Planning;
+    smartFillPreviewDeferred_ = false;
+    smartFillPatch_ = -1;
+    smartFillRequestId_.clear();
+    const auto scene = scene_;
+    const auto accepted = atlases_, base = layerBase_;
+    const auto records = projections_;
+    const auto materials = selectedMaterials();
+    const int uv = uv_->currentIndex(), resolution = resolution_->currentData().toInt();
+    const bool parity = parity_;
+    const QString isolation = isolatedLayer_;
+    const auto camera = aiCamera(*scene, view_->camera());
+    const auto stateKey = smartFillStateKey();
+    setBusy(true);
+    progress_->setRange(0, 0);
+    status_->setText("Finding missing paint inside the selected materials' UV islands...");
+    refreshSmartFill();
+    native_ = std::thread([this, scene, accepted, base, records, materials, uv, resolution, parity, isolation,
+                           camera, replaceLayer, stateKey] {
+        try {
+            // Old projects may only contain camera snapshots. Freeze their
+            // original operations before excluding the repair being replaced.
+            const bool preparedLegacy = !parity && needsLegacyLayerPreparation(records);
+            auto remaining = preparedLegacy ? aiPrepareLayers(*scene, uv, base, records, &cancel_) : records;
+            if (!isolation.isEmpty())
+                for (auto &r : remaining)
+                    r["visible"] = r["layerId"].toString() == isolation;
+            if (!replaceLayer.isEmpty())
+                for (auto &r : remaining)
+                    if (r["layerId"].toString() == replaceLayer)
+                        r["visible"] = false;
+            auto source =
+                replaceLayer.isEmpty() ? accepted : aiComposeLayerStack(base, remaining, parity, &cancel_);
+            const auto fingerprint = aiSmartFillFingerprint(*scene, uv, source, remaining, parity, &cancel_);
+            auto plan =
+                aiPlanSmartFill(*scene, uv, source, aiUvDomains(*scene, uv, resolution, materials, &cancel_),
+                                materials, fingerprint, &cancel_);
+            const auto acceptedFingerprint =
+                replaceLayer.isEmpty() && isolation.isEmpty() && !preparedLegacy
+                    ? fingerprint
+                    : aiSmartFillFingerprint(*scene, uv, accepted, records, parity, &cancel_);
+            plan["sourceStateFingerprint"] = QString::fromLatin1(acceptedFingerprint.toHex());
+            plan["replaceLayer"] = replaceLayer;
+            plan["appearance"] = imageData(aiCapture(*scene, uv, source, camera, &cancel_).partial);
+            if (cancel_)
+                throw std::runtime_error("Cancelled");
+            const auto preview = makeSmartFillPreview(plan, *scene, uv, accepted, records, parity, stateKey,
+                                                      &cancel_, acceptedFingerprint);
+            QMetaObject::invokeMethod(
+                this,
+                [this, plan, preview] {
+                    if (native_.joinable())
+                        native_.join();
+                    if (cancel_) {
+                        smartFillStop("Smart fill preparation cancelled.");
+                        return;
+                    }
+                    pendingSmartFill_ = plan;
+                    smartFillPreview_ = preview;
+                    smartFillActive_ = false;
+                    smartFillPhase_ = SmartFillPhase::Idle;
+                    progress_->setRange(0, 1000);
+                    progress_->setValue(0);
+                    setBusy(false);
+                    showSmartFill();
+                    status_->setText(
+                        aiSmartFillRemaining(plan)
+                            ? "Smart fill preview ready. Review the targeted gaps and request count."
+                            : "No eligible gaps remain in the selected materials. No generation is needed.");
+                },
+                Qt::QueuedConnection);
+        } catch (const std::exception &e) {
+            const auto message = QString::fromUtf8(e.what());
+            QMetaObject::invokeMethod(
+                this, [this, message] { smartFillStop(message); }, Qt::QueuedConnection);
+        }
+    });
+}
+bool AiPanel::smartFillStale() const {
+    if (pendingSmartFill_.empty() || !scene_ || !smartFillPreview_ ||
+        smartFillPreview_->stateKey != smartFillStateKey())
+        return true;
+    return pendingSmartFill_.value("sourceStateFingerprint").toString() !=
+           QString::fromLatin1(smartFillPreview_->fingerprint.toHex());
+}
+QByteArray AiPanel::smartFillStateKey() const {
+    QByteArray key = QByteArray::number(quintptr(scene_.get())) + ':' +
+                     QByteArray::number(uv_->currentIndex()) + ':' + (parity_ ? "parity" : "legacy") + ':' +
+                     isolatedLayer_.toUtf8();
+    for (auto it = atlases_.cbegin(); it != atlases_.cend(); ++it)
+        key += ':' + it.key().toUtf8() + ':' + QByteArray::number(it->color.cacheKey()) + ':' +
+               QByteArray::number(it->coverage.cacheKey()) + ':' + QByteArray::number(it->repair.cacheKey());
+    for (const auto &record : projections_)
+        key += ':' + record.value("layerId").toString().toUtf8() + ':' +
+               record.value("contentRevision").toString().toUtf8() +
+               (record.value("visible").toBool(true) ? "+" : "-") +
+               QJsonDocument(record.value("blending").toObject()).toJson(QJsonDocument::Compact);
+    return key;
+}
+bool AiPanel::smartFillPreviewMatches() const {
+    if (!smartFillPreview_)
+        return false;
+    for (const auto &key : {"source", "masks", "eligibleMasks", "repairs"})
+        if (pendingSmartFill_.value(key) != smartFillPreview_->plan.value(key))
+            return false;
+    return true;
+}
+std::shared_ptr<AiPanel::SmartFillPreviewData>
+AiPanel::makeSmartFillPreview(const QJsonObject &plan, const Scene &scene, int uv, const AiAtlases &accepted,
+                              const QList<QJsonObject> &records, bool parity, const QByteArray &stateKey,
+                              std::atomic_bool *cancel, const QByteArray &fingerprint) {
+    auto check = [cancel] {
+        if (cancel && cancel->load())
+            throw std::runtime_error("Cancelled");
+    };
+    check();
+    auto data = std::make_shared<SmartFillPreviewData>();
+    data->plan = plan;
+    data->stateKey = stateKey;
+    data->fingerprint = fingerprint.isEmpty()
+                            ? aiSmartFillFingerprint(scene, uv, accepted, records, parity, cancel)
+                            : fingerprint;
+    check();
+    data->atlases = aiSmartFillPreview(aiDeserializeAtlases(plan.value("source").toArray()), plan, cancel);
+    for (const auto &key : {"masks", "eligibleMasks"}) {
+        const auto encoded = plan.value(key).toObject();
+        for (auto it = encoded.constBegin(); it != encoded.constEnd(); ++it) {
+            check();
+            const auto image =
+                QImage::fromData(QByteArray::fromBase64(it.value().toString().toLatin1()), "PNG");
+            if (QString::fromLatin1(key) == "masks")
+                data->masks[it.key()] = image.convertToFormat(QImage::Format_RGB32);
+            else
+                data->eligibility[it.key()] = image;
+        }
+    }
+    check();
+    return data;
+}
+void AiPanel::prepareSmartFillPreview(QJsonObject plan, bool replacePending) {
+    if (busy_ || !scene_)
+        return;
+    if (native_.joinable())
+        native_.join();
+    const auto scene = scene_;
+    const auto accepted = atlases_;
+    const auto records = projections_;
+    const bool parity = parity_;
+    const int uv = uv_->currentIndex();
+    const auto key = smartFillStateKey();
+    const auto fingerprint = smartFillPreview_ && smartFillPreview_->stateKey == key
+                                 ? smartFillPreview_->fingerprint
+                                 : QByteArray();
+    cancel_ = false;
+    smartFillActive_ = true;
+    smartFillPhase_ = SmartFillPhase::Preview;
+    smartFillPreviewDeferred_ = false;
+    setBusy(true);
+    progress_->setRange(0, 0);
+    status_->setText("Preparing Smart fill previews. Accepted paint is unchanged...");
+    native_ =
+        std::thread([this, plan, replacePending, scene, accepted, records, parity, uv, key, fingerprint] {
+            try {
+                const auto preview = makeSmartFillPreview(plan, *scene, uv, accepted, records, parity, key,
+                                                          &cancel_, fingerprint);
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, plan, replacePending, preview] {
+                        if (native_.joinable())
+                            native_.join();
+                        if (cancel_) {
+                            smartFillStop("Smart fill preview preparation cancelled.");
+                            return;
+                        }
+                        if (replacePending)
+                            pendingSmartFill_ = plan;
+                        smartFillPreview_ = preview;
+                        smartFillStop("Smart fill preview ready.");
+                    },
+                    Qt::QueuedConnection);
+            } catch (const std::exception &e) {
+                const auto message = QString::fromUtf8(e.what());
+                QMetaObject::invokeMethod(
+                    this, [this, message] { smartFillStop(message); }, Qt::QueuedConnection);
+            }
+        });
+}
+void AiPanel::showSmartFill() {
+    if (pendingSmartFill_.empty())
+        return;
+    if (smartFillDialog_) {
+        refreshSmartFill();
+        smartFillDialog_->show();
+        smartFillDialog_->raise();
+        return;
+    }
+    auto dialog = new QDialog(this);
+    smartFillDialog_ = dialog;
+    dialog->setObjectName("aiSmartFillDialog");
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowModality(Qt::ApplicationModal);
+    dialog->setWindowTitle("Smart fill · preserve accepted paint");
+    auto layout = new QVBoxLayout(dialog);
+    smartFillInfo_ = new QLabel;
+    smartFillInfo_->setObjectName("aiSmartFillInfo");
+    smartFillInfo_->setWordWrap(true);
+    layout->addWidget(smartFillInfo_);
+    auto materialBar = new QHBoxLayout;
+    materialBar->addWidget(new QLabel("Selected material"));
+    smartFillMaterial_ = new ScrollComboBox;
+    smartFillMaterial_->setObjectName("aiSmartFillMaterial");
+    materialBar->addWidget(smartFillMaterial_, 1);
+    auto showTargets = new QCheckBox("Show targeted gaps");
+    showTargets->setChecked(true);
+    materialBar->addWidget(showTargets);
+    layout->addLayout(materialBar);
+    auto tabs = new QTabWidget;
+    layout->addWidget(tabs, 1);
+    smartFillCanvas_ = new AiMaskCanvas;
+    smartFillCanvas_->setObjectName("aiSmartFillMask");
+    smartFillCanvas_->targets = smartFillCanvas_->regions = true;
+    connect(showTargets, &QCheckBox::toggled, smartFillCanvas_, [this](bool shown) {
+        smartFillCanvas_->maskVisible = shown;
+        smartFillCanvas_->update();
+    });
+    tabs->addTab(smartFillCanvas_, "UV texture and targeted gaps");
+    smartFillView_ = new TransferViewport;
+    smartFillView_->setObjectName("aiSmartFillViewport");
+    smartFillView_->setMesh(scene_, uv_->currentIndex());
+    smartFillView_->setCamera(view_->camera());
+    smartFillView_->setDisplay("ALB");
+    smartFillView_->setUncoveredOverlay(true);
+    tabs->addTab(smartFillView_, "3D candidate preview");
+    auto instruction = new QLabel(
+        "Green marks targeted gaps. Click a region to exclude it; right-click to restore it. "
+        "Existing painted pixels stay exactly unchanged. Completed repairs appear in both previews.");
+    instruction->setWordWrap(true);
+    layout->addWidget(instruction);
+    auto buttons = new QHBoxLayout;
+    layout->addLayout(buttons);
+    smartFillGenerate_ = new QPushButton;
+    smartFillGenerate_->setObjectName("aiSmartFillGenerate");
+    smartFillApply_ = new QPushButton;
+    smartFillApply_->setObjectName("aiSmartFillApply");
+    smartFillReplan_ = new QPushButton("Regenerate preview");
+    smartFillReplan_->setObjectName("aiSmartFillReplan");
+    smartFillReprocess_ = new QPushButton("Reprocess candidate");
+    smartFillReprocess_->setObjectName("aiSmartFillReprocess");
+    smartFillDiscard_ = new QPushButton("Discard");
+    smartFillDiscard_->setObjectName("aiSmartFillDiscard");
+    auto cancel = new QPushButton("Cancel generation");
+    cancel->setObjectName("aiSmartFillCancel");
+    auto close = new QPushButton("Close");
+    for (auto b : {smartFillGenerate_, smartFillApply_, smartFillReplan_, smartFillReprocess_,
+                   smartFillDiscard_, cancel, close})
+        buttons->addWidget(b);
+    connect(smartFillGenerate_, &QPushButton::clicked, this, &AiPanel::smartFillGenerate);
+    connect(smartFillApply_, &QPushButton::clicked, this, &AiPanel::smartFillApply);
+    connect(smartFillReprocess_, &QPushButton::clicked, this, &AiPanel::smartFillReprocess);
+    connect(smartFillReplan_, &QPushButton::clicked, this,
+            [this] { prepareSmartFill(pendingSmartFill_["replaceLayer"].toString()); });
+    connect(smartFillDiscard_, &QPushButton::clicked, this, &AiPanel::smartFillDiscard);
+    connect(cancel, &QPushButton::clicked, this, &AiPanel::cancelJob);
+    connect(close, &QPushButton::clicked, dialog, &QDialog::close);
+    connect(smartFillMaterial_, &QComboBox::currentIndexChanged, this, [this] { refreshSmartFill(); });
+    smartFillCanvas_->maskChanged = [this] {
+        if (busy_ || pendingSmartFill_.empty() || !smartFillMaterial_)
+            return;
+        try {
+            QMap<QString, QImage> masks;
+            masks[smartFillMaterial_->currentText()] = smartFillCanvas_->mask;
+            if (native_.joinable())
+                native_.join();
+            const auto plan = pendingSmartFill_;
+            const auto scene = scene_;
+            const auto accepted = atlases_;
+            const auto records = projections_;
+            const auto key = smartFillStateKey();
+            const auto fingerprint = smartFillPreview_ && smartFillPreview_->stateKey == key
+                                         ? smartFillPreview_->fingerprint
+                                         : QByteArray();
+            const int uv = uv_->currentIndex();
+            const bool parity = parity_;
+            cancel_ = false;
+            smartFillActive_ = true;
+            smartFillPhase_ = SmartFillPhase::Preview;
+            setBusy(true);
+            progress_->setRange(0, 0);
+            status_->setText("Updating selected Smart fill gaps...");
+            native_ =
+                std::thread([this, plan, masks, scene, accepted, records, key, fingerprint, uv, parity] {
+                    try {
+                        const auto changed = aiSmartFillSetMasks(plan, masks, &cancel_);
+                        const auto preview = makeSmartFillPreview(changed, *scene, uv, accepted, records,
+                                                                  parity, key, &cancel_, fingerprint);
+                        QMetaObject::invokeMethod(
+                            this,
+                            [this, changed, preview] {
+                                if (native_.joinable())
+                                    native_.join();
+                                if (cancel_) {
+                                    smartFillStop("Smart fill selection update cancelled.");
+                                    return;
+                                }
+                                pendingSmartFill_ = changed;
+                                smartFillPreview_ = preview;
+                                smartFillStop("Smart fill selection updated.");
+                            },
+                            Qt::QueuedConnection);
+                    } catch (const std::exception &e) {
+                        const auto message = QString::fromUtf8(e.what());
+                        QMetaObject::invokeMethod(
+                            this, [this, message] { smartFillStop(message); }, Qt::QueuedConnection);
+                    }
+                });
+        } catch (const std::exception &e) {
+            status_->setText(QString::fromUtf8(e.what()));
+        }
+    };
+    connect(dialog, &QObject::destroyed, this, [this] {
+        smartFillCanvas_ = nullptr;
+        smartFillView_ = nullptr;
+        smartFillMaterial_ = nullptr;
+        smartFillInfo_ = nullptr;
+        smartFillGenerate_ = smartFillApply_ = smartFillDiscard_ = smartFillReplan_ = nullptr;
+        smartFillReprocess_ = nullptr;
+        smartFillRendered_ = nullptr;
+        smartFillRenderedMaterial_.clear();
+    });
+    dialog->resize(980, 820);
+    refreshSmartFill();
+    dialog->show();
+}
+void AiPanel::refreshSmartFill() {
+    if (!smartFillDialog_ || !smartFillMaterial_ || pendingSmartFill_.empty())
+        return;
+    try {
+        const auto masks = pendingSmartFill_["masks"].toObject();
+        if (smartFillMaterial_->count() != masks.size() ||
+            (smartFillMaterial_->count() && !masks.contains(smartFillMaterial_->itemText(0)))) {
+            const QSignalBlocker block(smartFillMaterial_);
+            smartFillMaterial_->clear();
+            smartFillMaterial_->addItems(masks.keys());
+        }
+        const int total = pendingSmartFill_["patches"].toArray().size();
+        const int remaining = aiSmartFillRemaining(pendingSmartFill_), completed = total - remaining;
+        const bool legacy = pendingSmartFill_.value("version").toInt() < 2;
+        const auto patches = pendingSmartFill_.value("patches").toArray();
+        const bool rawResult = !legacy && !patches.isEmpty() &&
+                               !patches.first().toObject().value("generated").toString().isEmpty();
+        const bool stale = smartFillStale();
+        const bool previewReady = smartFillPreviewMatches();
+        const bool idle = !busy_ && !externalBusy_ && previewReady;
+        const QString summary =
+            legacy ? QString("Legacy preview · %1 completed repair(s). A new preview uses one AI request.")
+                         .arg(completed)
+                   : QString("%1 selected material(s) · %2 AI request(s) · %3")
+                         .arg(masks.size())
+                         .arg(total ? 1 : 0)
+                         .arg(completed ? "Candidate ready"
+                              : total   ? "All selected gaps in one generation"
+                                        : "No eligible gaps");
+        QString detail =
+            stale ? "The accepted texture, mesh, UVs, or resolution changed. Regenerate the preview before "
+                    "applying."
+            : legacy
+                ? "This saved preview uses the previous crop workflow. You can apply completed repairs."
+                : pendingSmartFill_.value("message").toString(
+                      "One AI generation fills all selected gaps. Only green gaps can receive new paint.");
+        if (busy_ && smartFillActive_)
+            detail = status_->text();
+        if (legacy)
+            detail +=
+                " New one-request preview replaces this pending preview, including any completed repairs.";
+        else if (completed && pendingSmartFill_.value("matchingVersion").toInt() < 2 && !busy_)
+            detail += " Reprocess candidate updates saved boundary matching without another AI generation.";
+        smartFillInfo_->setText(summary + "\n" + detail);
+        smartFillGenerate_->setText(rawResult && !completed ? "Retry processing"
+                                    : pendingSmartFill_.value("attempted").toBool() && !completed
+                                        ? "Retry generation"
+                                        : "Generate");
+        smartFillGenerate_->setEnabled(idle && !legacy && !stale && remaining > 0 && total == 1 &&
+                                       cloud_.backend() != AiCloudImage::Backend::None);
+        smartFillGenerate_->setToolTip(
+            legacy ? "Choose New one-request preview before generating. Existing completed repairs remain "
+                     "available to Apply."
+            : cloud_.backend() == AiCloudImage::Backend::None
+                ? "Sign in to Codex or configure the OpenAI API to use GPT Image 2."
+                : cloud_.backendDescription());
+        smartFillApply_->setText(remaining ? "Apply completed" : "Apply Smart fill");
+        smartFillApply_->setEnabled(idle && !stale && completed > 0);
+        smartFillReplan_->setEnabled(!busy_ && !externalBusy_ && scene_);
+        smartFillReplan_->setText(legacy ? "New one-request preview" : "Regenerate preview");
+        smartFillReprocess_->setVisible(rawResult);
+        smartFillReprocess_->setEnabled(idle && !stale && rawResult);
+        smartFillDiscard_->setEnabled(!busy_ && !externalBusy_);
+        if (auto cancel = smartFillDialog_->findChild<QPushButton *>("aiSmartFillCancel"))
+            cancel->setEnabled(smartFillActive_);
+        smartFillCanvas_->editable = idle && completed == 0;
+        smartFillMaterial_->setEnabled(!smartFillActive_);
+        if (!previewReady) {
+            if (!busy_ && !smartFillPreviewDeferred_)
+                prepareSmartFillPreview(pendingSmartFill_);
+            return;
+        }
+        const QString material = smartFillMaterial_->currentText();
+        if (smartFillRendered_ == smartFillPreview_.get() && smartFillRenderedMaterial_ == material)
+            return;
+        smartFillCanvas_->eligibility = smartFillPreview_->eligibility.value(material);
+        smartFillCanvas_->set(smartFillPreview_->atlases.value(material).color,
+                              smartFillPreview_->masks.value(material));
+        QMap<QString, PreviewMaterial> maps;
+        for (auto it = smartFillPreview_->atlases.cbegin(); it != smartFillPreview_->atlases.cend(); ++it) {
+            PreviewMaterial m;
+            m.base = it->color;
+            m.coverage = it->coverage;
+            m.maps["ALB"] = it->color;
+            maps[it.key()] = m;
+        }
+        smartFillView_->setMaterials(maps, false);
+        smartFillRendered_ = smartFillPreview_.get();
+        smartFillRenderedMaterial_ = material;
+    } catch (const std::exception &e) {
+        smartFillInfo_->setText(QString::fromUtf8(e.what()));
+        smartFillGenerate_->setEnabled(false);
+        smartFillApply_->setEnabled(false);
+    }
+}
+void AiPanel::smartFillGenerate() {
+    if (busy_ || externalBusy_ || pendingSmartFill_.empty() || smartFillStale() ||
+        cloud_.backend() == AiCloudImage::Backend::None || !aiSmartFillRemaining(pendingSmartFill_))
+        return;
+    const auto savedPatches = pendingSmartFill_.value("patches").toArray();
+    if (pendingSmartFill_.value("version").toInt() >= 2 && savedPatches.size() == 1 &&
+        !savedPatches.first().toObject().value("generated").toString().isEmpty()) {
+        smartFillReprocess();
+        return;
+    }
+    if (pendingSmartFill_.value("version").toInt() < 2 ||
+        pendingSmartFill_["patches"].toArray().size() != 1) {
+        pendingSmartFill_["message"] =
+            "Choose New one-request preview before generating. The existing pending preview and completed "
+            "repairs are retained until you replace or apply them.";
+        status_->setText(pendingSmartFill_.value("message").toString());
+        refreshSmartFill();
+        return;
+    }
+    if (native_.joinable())
+        native_.join();
+    engine_.stop();
+    smartFillWork_ = std::make_unique<QTemporaryDir>();
+    if (!smartFillWork_->isValid()) {
+        smartFillStop("Cannot create Smart fill work directory.");
+        return;
+    }
+    cancel_ = false;
+    smartFillActive_ = true;
+    smartFillPhase_ = SmartFillPhase::Request;
+    pendingSmartFill_["attempted"] = true;
+    setBusy(true);
+    progress_->setRange(0, 0);
+    status_->setText("Preparing the Smart fill image and repair mask...");
+    refreshSmartFill();
+    smartFillRequest();
+}
+void AiPanel::smartFillRequest() {
+    if (cancel_) {
+        smartFillStop("Smart fill cancelled. The pending preview is retained.");
+        return;
+    }
+    const auto patches = pendingSmartFill_["patches"].toArray();
+    if (pendingSmartFill_.value("version").toInt() < 2 || patches.size() != 1 ||
+        patches[0].toObject()["done"].toBool()) {
+        smartFillStop("Smart fill requires a new one-request preview.");
+        return;
+    }
+    smartFillPatch_ = 0;
+    const auto plan = pendingSmartFill_;
+    const auto dir = smartFillWork_->path();
+    const auto stateKey = smartFillStateKey();
+    smartFillRequestId_ = QString("smart-fill-%1").arg(++requestSerial_);
+    const auto requestId = smartFillRequestId_;
+    native_ = std::thread([this, plan, dir, stateKey, requestId] {
+        try {
+            const auto appearance = QImage::fromData(
+                QByteArray::fromBase64(plan.value("appearance").toString().toLatin1()), "PNG");
+            auto request = aiSmartFillRequest(plan, 0, dir, appearance, &cancel_);
+            request["id"] = requestId;
+            QMetaObject::invokeMethod(
+                this,
+                [this, request, stateKey] {
+                    if (native_.joinable())
+                        native_.join();
+                    if (cancel_ || stateKey != smartFillStateKey()) {
+                        smartFillStop(
+                            cancel_ ? "Smart fill request preparation cancelled."
+                                    : "The accepted texture changed. Regenerate the Smart fill preview.");
+                        return;
+                    }
+                    smartFillPhase_ = SmartFillPhase::Provider;
+                    status_->setText(
+                        "Waiting for one AI image for all selected gaps. Generation time varies...");
+                    progress_->setRange(0, 0);
+                    refreshSmartFill();
+                    cloud_.generate(request);
+                },
+                Qt::QueuedConnection);
+        } catch (const std::exception &e) {
+            const auto message = QString::fromUtf8(e.what());
+            QMetaObject::invokeMethod(
+                this, [this, message] { smartFillStop(message); }, Qt::QueuedConnection);
+        }
+    });
+}
+void AiPanel::smartFillEvent(const QJsonObject &event) {
+    if (!smartFillActive_ || smartFillPhase_ != SmartFillPhase::Provider || smartFillPatch_ < 0 ||
+        event["id"].toString() != smartFillRequestId_)
+        return;
+    const auto type = event["event"].toString();
+    if (type == "progress") {
+        status_->setText(event["message"].toString());
+        if (event.value("indeterminate").toBool() || event.value("fraction").toDouble() < 0)
+            progress_->setRange(0, 0);
+        else {
+            progress_->setRange(0, 1000);
+            progress_->setValue(int(event["fraction"].toDouble() * 1000));
+        }
+        refreshSmartFill();
+    } else if (type == "error")
+        smartFillStop(event["message"].toString());
+    else if (type == "result")
+        processSmartFillResult(event.value("output").toString());
+}
+void AiPanel::smartFillReprocess() {
+    if (busy_ || externalBusy_ || pendingSmartFill_.empty() || smartFillStale())
+        return;
+    const auto patches = pendingSmartFill_.value("patches").toArray();
+    if (pendingSmartFill_.value("version").toInt() < 2 || patches.size() != 1 ||
+        patches.first().toObject().value("generated").toString().isEmpty())
+        return;
+    if (native_.joinable())
+        native_.join();
+    cancel_ = false;
+    smartFillActive_ = true;
+    setBusy(true);
+    processSmartFillResult();
+}
+void AiPanel::processSmartFillResult(const QString &path) {
+    smartFillPhase_ = SmartFillPhase::Processing;
+    status_->setText("Matching gap colors and preparing UV/3D previews. No additional AI request...");
+    progress_->setRange(0, 0);
+    refreshSmartFill();
+    const auto plan = pendingSmartFill_;
+    const auto scene = scene_;
+    const auto accepted = atlases_;
+    const auto records = projections_;
+    const auto key = smartFillStateKey();
+    const auto fingerprint = smartFillPreview_ && smartFillPreview_->stateKey == key
+                                 ? smartFillPreview_->fingerprint
+                                 : QByteArray();
+    const int uv = uv_->currentIndex();
+    const bool parity = parity_;
+    native_ = std::thread([this, path, plan, scene, accepted, records, key, fingerprint, uv, parity] {
+        try {
+            auto raw = plan;
+            if (!path.isEmpty()) {
+                const auto generated = readTextureImage(path);
+                if (generated.isNull())
+                    throw std::runtime_error("AI returned an invalid repair image");
+                auto patches = raw.value("patches").toArray();
+                auto patch = patches.first().toObject();
+                patch["generated"] = imageData(generated);
+                patches[0] = patch;
+                raw["patches"] = patches;
+                // Checkpoint the returned image before matching. Cancellation
+                // can then resume local processing without another AI request.
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, raw] {
+                        if (smartFillPhase_ == SmartFillPhase::Processing)
+                            pendingSmartFill_ = raw;
+                    },
+                    Qt::QueuedConnection);
+            }
+            const auto completed = aiSmartFillReprocess(raw, &cancel_);
+            const auto preview = makeSmartFillPreview(completed, *scene, uv, accepted, records, parity, key,
+                                                      &cancel_, fingerprint);
+            QMetaObject::invokeMethod(
+                this,
+                [this, completed, preview] {
+                    if (native_.joinable())
+                        native_.join();
+                    if (cancel_) {
+                        smartFillStop("Smart fill processing cancelled. The pending preview is retained.");
+                        return;
+                    }
+                    pendingSmartFill_ = completed;
+                    smartFillPreview_ = preview;
+                    smartFillStop(
+                        "Smart fill candidate ready. Inspect UV and 3D previews, then Apply Smart fill.");
+                },
+                Qt::QueuedConnection);
+        } catch (const std::exception &e) {
+            const auto message = QString::fromUtf8(e.what());
+            QMetaObject::invokeMethod(
+                this, [this, message] { smartFillStop(message); }, Qt::QueuedConnection);
+        }
+    });
+}
+void AiPanel::smartFillStop(const QString &message) {
+    cloud_.cancel();
+    if (native_.joinable())
+        native_.join();
+    smartFillActive_ = false;
+    smartFillPhase_ = SmartFillPhase::Idle;
+    smartFillPreviewDeferred_ = cancel_ || !smartFillPreviewMatches();
+    smartFillRendered_ = nullptr;
+    smartFillPatch_ = -1;
+    smartFillRequestId_.clear();
+    if (!pendingSmartFill_.empty())
+        pendingSmartFill_["message"] = message;
+    setBusy(false);
+    progress_->setRange(0, 1000);
+    progress_->setValue(!pendingSmartFill_.empty() && !aiSmartFillRemaining(pendingSmartFill_) ? 1000 : 0);
+    status_->setText(message + " Accepted paint is unchanged.");
+    refreshSmartFill();
+}
+void AiPanel::smartFillApply() {
+    if (busy_ || externalBusy_ || pendingSmartFill_.empty() || smartFillStale() ||
+        pendingSmartFill_["patches"].toArray().size() == aiSmartFillRemaining(pendingSmartFill_))
+        return;
+    rememberRegenerationTarget();
+    if (native_.joinable())
+        native_.join();
+    const auto previous = historyState();
+    const auto scene = scene_;
+    const auto base = layerBase_;
+    const auto before = atlases_;
+    const auto original = projections_;
+    const auto plan = pendingSmartFill_;
+    const auto key = smartFillStateKey();
+    const auto cached = smartFillPreviewMatches() ? smartFillPreview_ : nullptr;
+    const auto isolation = isolatedLayer_;
+    const int uv = uv_->currentIndex();
+    const bool parity = parity_;
+    cancel_ = false;
+    smartFillActive_ = true;
+    smartFillPhase_ = SmartFillPhase::Applying;
+    setBusy(true);
+    progress_->setRange(0, 0);
+    status_->setText("Composing the UV repair layer and verifying exact paint preservation...");
+    refreshSmartFill();
+    native_ = std::thread([this, previous, scene, base, before, original, plan, key, cached, isolation, uv,
+                           parity] {
+        try {
+            auto record = aiSmartFillLayer(plan);
+            const auto preview =
+                cached ? cached->atlases
+                       : aiSmartFillPreview(aiDeserializeAtlases(plan.value("source").toArray()), plan,
+                                            &cancel_);
+            if (!preview.empty())
+                record["candidate"] = imageData(
+                    preview.first().color.scaled(256, 256, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            auto records = !parity && needsLegacyLayerPreparation(original)
+                               ? aiPrepareLayers(*scene, uv, base, original, &cancel_)
+                               : original;
+            int selected = -1;
+            const QString replace = plan.value("replaceLayer").toString();
+            for (int i = 0; i < records.size(); ++i)
+                if (!replace.isEmpty() && records[i]["layerId"].toString() == replace) {
+                    record["layerId"] = replace;
+                    record["visible"] = records[i]["visible"];
+                    records[i] = record;
+                    selected = i;
+                    break;
+                }
+            if (selected < 0) {
+                selected = 0;
+                while (selected < records.size() && aiIsRepairLayer(records[selected]))
+                    ++selected;
+                records.insert(selected, record);
+            }
+            auto effective = records;
+            if (!isolation.isEmpty())
+                for (auto &r : effective)
+                    r["visible"] = r["layerId"].toString() == isolation;
+            auto composed = aiComposeLayerStack(base, effective, parity, &cancel_);
+            requireUnchangedOrdinaryPaint(before, composed, &cancel_);
+            QMetaObject::invokeMethod(
+                this,
+                [this, previous, records, composed, key, selected] {
+                    if (native_.joinable())
+                        native_.join();
+                    if (cancel_ || key != smartFillStateKey()) {
+                        smartFillStop(
+                            cancel_
+                                ? "Smart fill Apply cancelled. The candidate is retained."
+                                : "Accepted paint changed during Apply. Regenerate the Smart fill preview.");
+                        return;
+                    }
+                    undo_ << previous;
+                    if (undo_.size() > 10)
+                        undo_.removeFirst();
+                    redo_.clear();
+                    atlases_ = composed;
+                    projections_ = records;
+                    pendingSmartFill_ = {};
+                    smartFillPreview_.reset();
+                    smartFillRendered_ = nullptr;
+                    layerFrames_.clear();
+                    layerDecoded_.clear();
+                    ++revision_;
+                    smartFillActive_ = false;
+                    smartFillPhase_ = SmartFillPhase::Idle;
+                    if (smartFillDialog_)
+                        smartFillDialog_->close();
+                    refreshLayers();
+                    layers_->setCurrentRow(records.size() - 1 - selected);
+                    updatePreview();
+                    refresh();
+                    setBusy(false);
+                    progress_->setRange(0, 1000);
+                    progress_->setValue(1000);
+                    status_->setText(
+                        "Smart fill applied as one UV repair layer. Existing paint is pixel-identical. Undo "
+                        "is available.");
+                },
+                Qt::QueuedConnection);
+        } catch (const std::exception &e) {
+            const auto message = QString::fromUtf8(e.what());
+            QMetaObject::invokeMethod(
+                this, [this, message] { smartFillStop(message); }, Qt::QueuedConnection);
+        }
+    });
+}
+void AiPanel::smartFillDiscard() {
+    if (busy_)
+        return;
+    pendingSmartFill_ = {};
+    smartFillPreview_.reset();
+    smartFillRendered_ = nullptr;
+    smartFillWork_.reset();
+    if (smartFillDialog_)
+        smartFillDialog_->close();
+    status_->setText("Smart fill candidate discarded. Accepted paint is unchanged.");
+    refresh();
+}
 void AiPanel::setBusy(bool b) {
     busy_ = b;
     if (!b) {
         automatic_ = false;
+        progress_->setRange(0, 1000);
     }
     emit runningChanged(b);
     refresh();
@@ -1594,7 +2532,8 @@ void AiPanel::refreshMultiviewViews() {
     for (int i = 0; i < multiviewCameras_.size(); ++i) {
         QImage thumbnail;
         try {
-            const auto c = aiCapture(*scene_, uv_->currentIndex(), {}, aiCamera(*scene_, multiviewCameras_[i], 128));
+            const auto c =
+                aiCapture(*scene_, uv_->currentIndex(), {}, aiCamera(*scene_, multiviewCameras_[i], 128));
             thumbnail = c.normal.copy();
             for (int y = 0; y < thumbnail.height(); ++y)
                 for (int x = 0; x < thumbnail.width(); ++x)
@@ -1612,13 +2551,42 @@ void AiPanel::refreshMultiviewViews() {
 std::optional<float> AiPanel::frontYaw(int excludeLayer) const {
     // The first visible accepted view defines the front for view-aware generation.
     for (int i = 0; i < projections_.size(); ++i)
-        if (i != excludeLayer && (isolatedLayer_.isEmpty() ? projections_[i]["visible"].toBool(true)
-                                                           : projections_[i]["layerId"].toString() == isolatedLayer_))
+        if (i != excludeLayer && !aiIsRepairLayer(projections_[i]) &&
+            (isolatedLayer_.isEmpty() ? projections_[i]["visible"].toBool(true)
+                                      : projections_[i]["layerId"].toString() == isolatedLayer_))
             return float(projections_[i]["camera"].toObject()["yaw"].toDouble());
     return std::nullopt;
 }
+void AiPanel::rememberRegenerationTarget() {
+    if (candidate_.isNull())
+        return;
+    if (regenerateLayerId_.isEmpty())
+        regenerateLayerId_ = candidateSettings_.value("regenerateLayerId").toString();
+    if (regenerateLayerId_.isEmpty() && regenerateIndex_ >= 0 && regenerateIndex_ < projections_.size() &&
+        !aiIsRepairLayer(projections_[regenerateIndex_]))
+        regenerateLayerId_ = projections_[regenerateIndex_]["layerId"].toString();
+    if (!regenerateLayerId_.isEmpty())
+        candidateSettings_["regenerateLayerId"] = regenerateLayerId_;
+}
+void AiPanel::reindexRegenerationTarget() {
+    if (regenerateLayerId_.isEmpty())
+        return;
+    regenerateIndex_ = -1;
+    for (int i = 0; i < projections_.size(); ++i)
+        if (!aiIsRepairLayer(projections_[i]) &&
+            projections_[i]["layerId"].toString() == regenerateLayerId_) {
+            regenerateIndex_ = i;
+            break;
+        }
+}
 void AiPanel::regenerateLayer(int index) {
-    if (busy_ || externalBusy_ || !scene_ || !modelReady() || index < 0 || index >= projections_.size())
+    if (busy_ || externalBusy_ || !scene_ || index < 0 || index >= projections_.size())
+        return;
+    if (aiIsRepairLayer(projections_[index])) {
+        prepareSmartFill(projections_[index]["layerId"].toString());
+        return;
+    }
+    if (!modelReady())
         return;
     if (parity_ && !projectionError_.isEmpty()) {
         status_->setText("Projection renderer unavailable: " + projectionError_ +
@@ -1641,6 +2609,7 @@ void AiPanel::regenerateLayer(int index) {
     cameras_.clear();
     cameraIndex_ = 0;
     regenerateIndex_ = index;
+    regenerateLayerId_ = projections_[index]["layerId"].toString();
     setBusy(true);
     status_->setText(QString("Preparing to regenerate projection %1 without its own paint…").arg(index + 1));
     auto scene = scene_;
@@ -1652,15 +2621,16 @@ void AiPanel::regenerateLayer(int index) {
     native_ = std::thread([this, scene, base, records, uv, index, parity, isolation] {
         try {
             // The layer must not feed its own replacement: compose the stack without it.
-            const bool legacy = !parity && std::any_of(records.begin(), records.end(), [](const QJsonObject &r) {
-                return r["uvLayer"].toObject()["version"].toInt() != 1;
-            });
+            const bool legacy =
+                !parity && std::any_of(records.begin(), records.end(), [](const QJsonObject &r) {
+                    return !aiIsRepairLayer(r) && r["uvLayer"].toObject()["version"].toInt() != 1;
+                });
             auto prepared = legacy ? aiPrepareLayers(*scene, uv, base, records, &cancel_) : records;
             if (!isolation.isEmpty())
                 for (auto &record : prepared)
                     record["visible"] = record["layerId"].toString() == isolation;
             prepared[index]["visible"] = false;
-            const auto without = aiComposeLayers(base, prepared, &cancel_, &layerDecoded_);
+            const auto without = aiComposeLayerStack(base, prepared, parity, &cancel_, &layerDecoded_);
             const auto camera = aiCameraFromJson(records[index]["camera"].toObject());
             auto capture = std::make_shared<AiCapture>(aiCapture(*scene, uv, without, camera, &cancel_));
             QMetaObject::invokeMethod(
@@ -1694,10 +2664,12 @@ void AiPanel::generate(bool automatic) {
     automatic_ = automatic;
     cameraIndex_ = 0;
     regenerateIndex_ = -1;
+    regenerateLayerId_.clear();
     // A manual orthographic view is reframed to the visible mesh bounds; the direction stays as orbited.
     if (automatic && multiviewCameras_.empty())
         resetMultiviewCameras();
-    cameras_ = automatic ? multiviewCameras_ : QList<OrbitCamera>{aiFrameCamera(*scene_, view_->camera(), true)};
+    cameras_ =
+        automatic ? multiviewCameras_ : QList<OrbitCamera>{aiFrameCamera(*scene_, view_->camera(), true)};
     setBusy(true);
     nextCamera();
 }
@@ -1766,8 +2738,9 @@ void AiPanel::receiveCapture(std::shared_ptr<AiCapture> capture, double contribu
     const double turn =
         front ? std::abs(std::remainder(double(capture_->camera.orbit.yaw) - double(*front), 360.0)) : 0.0;
     if (cloudModel()) {
-        // GPT Image 2 with ownership: this view sees the locked paint of earlier views and bare clay elsewhere,
-        // and only paints the clay; the result is composited back over the locked pixels before projection.
+        // GPT Image 2 with ownership: this view sees the locked paint of earlier views and bare clay
+        // elsewhere, and only paints the clay; the result is composited back over the locked pixels before
+        // projection.
         try {
             lock_ = std::make_shared<AiLock>(aiLockedGuide(*capture_));
             const QString guide = dir + "/guide.png";
@@ -1776,9 +2749,11 @@ void AiPanel::receiveCapture(std::shared_ptr<AiCapture> capture, double contribu
             QJsonArray images{guide};
             if (!references.empty())
                 images.append(references.first()); // The prompt names one reference image (image 2).
-            const QString prompt = aiGptPrompt(!lock_->any, !references.empty(), prompt_->toPlainText(),
-                                               aiGptViewDescription(turn, capture_->camera.orbit.pitch, bool(front)));
+            const QString prompt =
+                aiGptPrompt(!lock_->any, !references.empty(), prompt_->toPlainText(),
+                            aiGptViewDescription(turn, capture_->camera.orbit.pitch, bool(front)));
             QJsonObject request{{"id", QString::number(++requestSerial_)},
+                                {"kind", "projection"},
                                 {"model", "gpt-image-2"},
                                 {"images", images},
                                 {"prompt", prompt},
@@ -1791,6 +2766,8 @@ void AiPanel::receiveCapture(std::shared_ptr<AiCapture> capture, double contribu
                                 {"size", capture_->camera.size}};
             guideImage_->setPixmap(QPixmap::fromImage(lock_->guide.scaled(700, 700, Qt::KeepAspectRatio)));
             candidateSettings_ = request;
+            if (!regenerateLayerId_.isEmpty())
+                candidateSettings_["regenerateLayerId"] = regenerateLayerId_;
             candidateSettings_["camera"] = aiCameraJson(capture_->camera);
             status_->setText("Generating with GPT Image 2…");
             cloud_.generate(request);
@@ -1800,6 +2777,7 @@ void AiPanel::receiveCapture(std::shared_ptr<AiCapture> capture, double contribu
         return;
     }
     QJsonObject request{{"command", "generate"},
+                        {"kind", "projection"},
                         {"id", QString::number(++requestSerial_)},
                         {"output", dir + "/candidate.png"},
                         {"size", capture_->camera.size},
@@ -1816,9 +2794,9 @@ void AiPanel::receiveCapture(std::shared_ptr<AiCapture> capture, double contribu
         const auto feedback = aiProjectionFeedback(*scene_, *capture_, continuity_->value() / 100.f,
                                                    projectionOptions(), &cancel_);
         request["conditioning"] = feedback.active ? "confidence" : "fresh";
-        for (auto pair :
-             {qMakePair(QString("normal"), capture_->normal), qMakePair(QString("neutral"), capture_->neutral),
-              qMakePair(QString("silhouette"), capture_->silhouette)}) {
+        for (auto pair : {qMakePair(QString("normal"), capture_->normal),
+                          qMakePair(QString("neutral"), capture_->neutral),
+                          qMakePair(QString("silhouette"), capture_->silhouette)}) {
             QString path = dir + "/" + pair.first + ".png";
             atomicImage(pair.second, path);
             request[pair.first] = path;
@@ -1842,6 +2820,8 @@ void AiPanel::receiveCapture(std::shared_ptr<AiCapture> capture, double contribu
     guideImage_->setPixmap(QPixmap::fromImage(capture_->normal.scaled(700, 700, Qt::KeepAspectRatio)));
     pending_ = request;
     candidateSettings_ = request;
+    if (!regenerateLayerId_.isEmpty())
+        candidateSettings_["regenerateLayerId"] = regenerateLayerId_;
     for (auto it = feedbackSettings.begin(); it != feedbackSettings.end(); ++it)
         candidateSettings_[it.key()] = it.value();
     candidateSettings_["camera"] = aiCameraJson(capture_->camera);
@@ -1856,7 +2836,8 @@ void AiPanel::receiveCapture(std::shared_ptr<AiCapture> capture, double contribu
         engine_.send(pending_);
         pending_ = {};
     } else {
-        // FORNAIO_AI_MODEL is a maintainer override for testing another model folder with the installed runtime.
+        // FORNAIO_AI_MODEL is a maintainer override for testing another model folder with the installed
+        // runtime.
         QString model = qEnvironmentVariable("FORNAIO_AI_MODEL");
         if (model.isEmpty())
             model = installer_.activePath() + "/model";
@@ -1865,17 +2846,26 @@ void AiPanel::receiveCapture(std::shared_ptr<AiCapture> capture, double contribu
     }
 }
 void AiPanel::workerEvent(const QJsonObject &event) {
+    if (smartFillActive_) {
+        smartFillEvent(event);
+        return;
+    }
     if (!busy_)
         return;
     QString type = event["event"].toString();
-    if (!event["id"].toString().isEmpty() && event["id"] != candidateSettings_["id"])
+    if (!event["id"].toString().isEmpty() && event["id"] != candidateSettings_.value("id"))
         return;
     if (type == "ready" && !pending_.empty()) {
         engine_.send(pending_);
         pending_ = {};
     } else if (type == "progress") {
         status_->setText(event["message"].toString());
-        progress_->setValue(int(event["fraction"].toDouble() * 1000));
+        if (event.value("indeterminate").toBool() || event.value("fraction").toDouble() < 0)
+            progress_->setRange(0, 0);
+        else {
+            progress_->setRange(0, 1000);
+            progress_->setValue(int(event["fraction"].toDouble() * 1000));
+        }
     } else if (type == "error")
         fail(event["message"].toString());
     else if (type == "result") {
@@ -1886,7 +2876,8 @@ void AiPanel::workerEvent(const QJsonObject &event) {
         candidate_ = readTextureImage(event["output"].toString());
         if (!candidate_.isNull()) {
             const QImage original = event["sourceImage"].toString().isEmpty()
-                                        ? candidate_ : readTextureImage(event["sourceImage"].toString());
+                                        ? candidate_
+                                        : readTextureImage(event["sourceImage"].toString());
             if (original.isNull()) {
                 fail("AI returned an invalid original source image");
                 return;
@@ -1895,7 +2886,7 @@ void AiPanel::workerEvent(const QJsonObject &event) {
             if (parity_)
                 candidate_ = original;
         }
-        const bool cloud = candidateSettings_["model"] == "gpt-image-2";
+        const bool cloud = candidateSettings_.value("model") == "gpt-image-2";
         QImage cloudMask;
         if (cloud && capture_ && lock_ && !candidate_.isNull()) {
             if (candidate_.width() != candidate_.height()) {
@@ -1904,15 +2895,17 @@ void AiPanel::workerEvent(const QJsonObject &event) {
             }
             try {
                 // GPT Image returns its own square size with the guide's framing, so a resize aligns it.
-                candidate_ = candidate_.convertToFormat(parity_ ? QImage::Format_RGBA8888 : QImage::Format_RGB32)
-                                 .scaled(capture_->camera.size, capture_->camera.size, Qt::IgnoreAspectRatio,
-                                         Qt::SmoothTransformation);
+                candidate_ =
+                    candidate_.convertToFormat(parity_ ? QImage::Format_RGBA8888 : QImage::Format_RGB32)
+                        .scaled(capture_->camera.size, capture_->camera.size, Qt::IgnoreAspectRatio,
+                                Qt::SmoothTransformation);
                 // Register the painted features onto the mesh before anything else uses the image.
                 if (!parity_) {
                     double shift = 0;
                     candidate_ = aiAlignToGeometry(*capture_, candidate_, &shift);
                     candidateSettings_["alignmentShift"] = shift;
-                    candidate_ = aiComposeLocked(*capture_, *lock_, aiMatchLockedTone(*capture_, *lock_, candidate_));
+                    candidate_ =
+                        aiComposeLocked(*capture_, *lock_, aiMatchLockedTone(*capture_, *lock_, candidate_));
                     cloudMask = aiGeneratedPaintMask(*capture_, *lock_, candidate_);
                 }
             } catch (const std::exception &e) {
@@ -1946,14 +2939,17 @@ void AiPanel::workerEvent(const QJsonObject &event) {
         QImage mask = capture_->silhouette.convertToFormat(QImage::Format_RGB32);
         if (parity_ && regenerateIndex_ >= 0 && regenerateIndex_ < projections_.size()) {
             const auto previous = projections_[regenerateIndex_];
-            const auto originalMask = previous["userMask"].isString() ? previous["userMask"] : previous["mask"];
-            const auto saved = QImage::fromData(QByteArray::fromBase64(originalMask.toString().toLatin1()), "PNG");
+            const auto originalMask =
+                previous["userMask"].isString() ? previous["userMask"] : previous["mask"];
+            const auto saved =
+                QImage::fromData(QByteArray::fromBase64(originalMask.toString().toLatin1()), "PNG");
             if (!saved.isNull())
-                mask = saved.convertToFormat(QImage::Format_RGB32).scaled(
-                    mask.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                mask = saved.convertToFormat(QImage::Format_RGB32)
+                           .scaled(mask.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
         }
         if (!parity_ && !event["guardMask"].toString().isEmpty()) {
-            const QImage guard = readTextureImage(event["guardMask"].toString()).convertToFormat(QImage::Format_Grayscale8);
+            const QImage guard =
+                readTextureImage(event["guardMask"].toString()).convertToFormat(QImage::Format_Grayscale8);
             if (guard.size() == mask.size())
                 for (int y = 0; y < mask.height(); ++y)
                     for (int x = 0; x < mask.width(); ++x)
@@ -1965,6 +2961,7 @@ void AiPanel::workerEvent(const QJsonObject &event) {
             mask = cloudMask;
         canvas_->set(candidate_, mask);
         sideCanvas_->set(candidate_, mask);
+        progress_->setRange(0, 1000);
         progress_->setValue(1000);
         const double alignment = event["alignment"].isDouble() ? event["alignment"].toDouble() : 1;
         if (alignment < .75) {
@@ -2001,6 +2998,13 @@ AiProjectionOptions AiPanel::projectionOptions() const {
 void AiPanel::projectCandidate(bool automatic) {
     if ((busy_ && !automatic) || externalBusy_ || !scene_ || !capture_ || candidate_.isNull())
         return;
+    rememberRegenerationTarget();
+    reindexRegenerationTarget();
+    if (!regenerateLayerId_.isEmpty() && regenerateIndex_ < 0) {
+        status_->setText("The layer for this regeneration was deleted. Undo its deletion or generate a new "
+                         "camera candidate.");
+        return;
+    }
     if (parity_ && !projectionError_.isEmpty()) {
         fail("Projection renderer unavailable: " + projectionError_);
         return;
@@ -2022,7 +3026,8 @@ void AiPanel::projectCandidate(bool automatic) {
     auto options = projectionOptions();
     // Legacy cloud views carry ownership in their mask: the lock core is excluded and its outer band ramps,
     // crossfading into accepted paint. Independent parity layers do not use this legacy mask behavior.
-    const bool ownedByMask = !parity_ && candidateSettings_["model"] == "gpt-image-2" && blendMode_->currentData() == "lock";
+    const bool ownedByMask =
+        !parity_ && candidateSettings_.value("model") == "gpt-image-2" && blendMode_->currentData() == "lock";
     if (ownedByMask) {
         options.lockQuality = 0;
         options.overlay = true;
@@ -2030,6 +3035,7 @@ void AiPanel::projectCandidate(bool automatic) {
     options.recordLayer = true;
     options.retainedMask = candidateRetention_;
     QJsonObject record = candidateSettings_;
+    record["kind"] = "projection";
     record["candidate"] = imageData(candidate);
     record["mask"] = imageData(mask);
     if (parity_)
@@ -2037,18 +3043,20 @@ void AiPanel::projectCandidate(bool automatic) {
     record["layerId"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
     record["materials"] = QJsonArray::fromStringList(materials.values());
     record["fillOnly"] = fill;
-    record["blending"] = QJsonObject{{"mode", ownedByMask ? QString("overlay") : blendMode_->currentData().toString()},
-                                     {"ownedByMask", ownedByMask},
-                                     {"strength", options.strength},
-                                     {"feather", options.feather},
-                                     {"anglePower", options.anglePower},
-                                     {"minCosine", options.minCosine},
-                                     {"fillGaps", options.fillGaps},
-                                     {"coverAll", options.coverAll},
-                                     {"colorMatch", options.colorMatch}};
+    record["blending"] =
+        QJsonObject{{"mode", ownedByMask ? QString("overlay") : blendMode_->currentData().toString()},
+                    {"ownedByMask", ownedByMask},
+                    {"strength", options.strength},
+                    {"feather", options.feather},
+                    {"anglePower", options.anglePower},
+                    {"minCosine", options.minCosine},
+                    {"fillGaps", options.fillGaps},
+                    {"coverAll", options.coverAll},
+                    {"colorMatch", options.colorMatch}};
     if (parity_)
         record["blending"] = QJsonObject{{"mode", options.overlay ? "overlay" : "blend"},
-                                          {"strength", options.strength}, {"depthMargin", 2}};
+                                         {"strength", options.strength},
+                                         {"depthMargin", 2}};
     status_->setText("Projecting visible surfaces into UV space…");
     const int replace = regenerateIndex_;
     const auto base = layerBase_;
@@ -2056,8 +3064,8 @@ void AiPanel::projectCandidate(bool automatic) {
     const bool parity = parity_;
     const QString isolation = isolatedLayer_;
     const int resolution = resolution_->currentData().toInt();
-    native_ = std::thread([this, scene, capture, atlases, candidate, mask, materials, uv, fill, record, options,
-                           replace, base, records, parity, resolution, isolation] {
+    native_ = std::thread([this, scene, capture, atlases, candidate, mask, materials, uv, fill, record,
+                           options, replace, base, records, parity, resolution, isolation] {
         try {
             if (parity) {
                 auto prepared = records;
@@ -2082,7 +3090,7 @@ void AiPanel::projectCandidate(bool automatic) {
                     for (auto &r : effective)
                         r["visible"] = r["layerId"].toString() == isolation;
                 auto result = std::make_shared<AiProjection>();
-                result->atlases = aiComposeParityLayers(base, effective, &cancel_);
+                result->atlases = aiComposeLayerStack(base, effective, true, &cancel_);
                 result->layer = baked["uvLayer"].toObject();
                 const auto contribution = aiDecodeProjectionLayer(result->layer);
                 for (const auto &image : contribution.materials)
@@ -2092,11 +3100,13 @@ void AiPanel::projectCandidate(bool automatic) {
                             result->changed += pixels[x * 4 + 3] != 0;
                     }
                 if (replace >= 0)
-                    QMetaObject::invokeMethod(this, [this, result, prepared] { finishRegeneration(*result, prepared); },
-                                               Qt::QueuedConnection);
+                    QMetaObject::invokeMethod(
+                        this, [this, result, prepared] { finishRegeneration(*result, prepared); },
+                        Qt::QueuedConnection);
                 else
-                    QMetaObject::invokeMethod(this, [this, result, baked] { finishProjection(*result, baked); },
-                                               Qt::QueuedConnection);
+                    QMetaObject::invokeMethod(
+                        this, [this, result, baked] { finishProjection(*result, baked); },
+                        Qt::QueuedConnection);
                 return;
             }
             if (replace >= 0) {
@@ -2104,11 +3114,13 @@ void AiPanel::projectCandidate(bool automatic) {
                 // replay the layers above it on top.
                 auto prepared = std::any_of(records.begin(), records.end(),
                                             [](const QJsonObject &r) {
-                                                return r["uvLayer"].toObject()["version"].toInt() != 1;
+                                                return !aiIsRepairLayer(r) &&
+                                                       r["uvLayer"].toObject()["version"].toInt() != 1;
                                             })
                                     ? aiPrepareLayers(*scene, uv, base, records, &cancel_)
                                     : records;
-                const auto below = aiComposeLayers(base, prepared.mid(0, replace), &cancel_, &layerDecoded_);
+                const auto below =
+                    aiWithoutRepairs(base, prepared.mid(0, replace), false, &cancel_, &layerDecoded_);
                 auto result = std::make_shared<AiProjection>(aiProject(
                     *scene, uv, below, *capture, candidate, mask, materials, fill, 8, &cancel_, options));
                 QJsonObject layerRecord = record;
@@ -2117,13 +3129,21 @@ void AiPanel::projectCandidate(bool automatic) {
                 layerRecord["visible"] = prepared[replace]["visible"];
                 layerRecord["regeneratedFrom"] = prepared[replace]["seed"];
                 prepared[replace] = layerRecord;
-                result->atlases = aiComposeLayers(base, prepared, &cancel_, &layerDecoded_);
+                result->atlases = aiComposeLayerStack(base, prepared, false, &cancel_, &layerDecoded_);
                 QMetaObject::invokeMethod(
-                    this, [this, result, prepared] { finishRegeneration(*result, prepared); }, Qt::QueuedConnection);
+                    this, [this, result, prepared] { finishRegeneration(*result, prepared); },
+                    Qt::QueuedConnection);
                 return;
             }
+            auto prepared = aiPrepareLayers(*scene, uv, base, records, &cancel_);
+            const auto ordinary = aiWithoutRepairs(base, prepared, false, &cancel_, &layerDecoded_);
             auto result = std::make_shared<AiProjection>(aiProject(
-                *scene, uv, atlases, *capture, candidate, mask, materials, fill, 8, &cancel_, options));
+                *scene, uv, ordinary, *capture, candidate, mask, materials, fill, 8, &cancel_, options));
+            auto added = record;
+            added["uvLayer"] = result->layer;
+            added["visible"] = true;
+            prepared.append(added);
+            result->atlases = aiComposeLayerStack(base, prepared, false, &cancel_, &layerDecoded_);
             QMetaObject::invokeMethod(
                 this, [this, result, record] { finishProjection(*result, record); }, Qt::QueuedConnection);
         } catch (const std::exception &e) {
@@ -2203,13 +3223,19 @@ void AiPanel::finishRegeneration(const AiProjection &result, const QList<QJsonOb
     refreshLayers();
     if (index >= 0 && index < projections_.size())
         layers_->setCurrentRow(projections_.size() - 1 - index);
-    status_->setText(QString("Projection %1 regenerated in place; the layers above it were reapplied. Undo restores "
-                             "the previous version.")
-                         .arg(index + 1));
+    status_->setText(
+        QString("Projection %1 regenerated in place; the layers above it were reapplied. Undo restores "
+                "the previous version.")
+            .arg(index + 1));
     setBusy(false);
 }
 void AiPanel::fail(const QString &message) {
+    if (smartFillActive_) {
+        smartFillStop(message);
+        return;
+    }
     regenerateIndex_ = -1;
+    regenerateLayerId_.clear();
     engine_.stop();
     cloud_.cancel();
     if (native_.joinable())
@@ -2224,6 +3250,14 @@ void AiPanel::cancelJob() {
         return;
     }
     cancel_ = true;
+    if (smartFillActive_) {
+        cloud_.cancel();
+        status_->setText("Cancelling Smart fill. Accepted paint is unchanged...");
+        refreshSmartFill();
+        if (!native_.joinable())
+            smartFillStop("Smart fill cancelled. The pending preview is retained for retry.");
+        return;
+    }
     engine_.stop();
     cloud_.cancel();
     if (!native_.joinable())
@@ -2280,6 +3314,7 @@ void AiPanel::chooseLocation() {
 void AiPanel::saveProject() {
     if (!scene_ || busy_)
         return;
+    rememberRegenerationTarget();
     QString path = QFileDialog::getSaveFileName(this, "Save AI texturing project", {},
                                                 "Fornaio AI project (*.fornaioai)");
     if (path.isEmpty())
@@ -2325,6 +3360,8 @@ void AiPanel::saveProject() {
             names[it.key()] = it.value();
         settings["exportNames"] = names;
         settings["layerBase"] = aiSerializeAtlases(layerBase_);
+        if (!pendingSmartFill_.empty())
+            settings["pendingSmartFill"] = pendingSmartFill_;
         auto records = projections_;
         if (!candidate_.isNull()) {
             QJsonObject saved = candidateSettings_;
@@ -2412,6 +3449,10 @@ void AiPanel::openProject() {
                                .arg(scene_->tris.size())
                                .arg(atlases_.size()));
         projections_ = records;
+        pendingSmartFill_ = settings["pendingSmartFill"].toObject();
+        smartFillPreview_.reset();
+        smartFillRendered_ = nullptr;
+        smartFillPreviewDeferred_ = false;
         layerBase_ = settings.contains("layerBase") ? aiDeserializeAtlases(settings["layerBase"].toArray())
                                                     : aiEmptyAtlases(*scene_, atlases_.first().color.width());
         if (projections_.empty())
@@ -2432,20 +3473,23 @@ void AiPanel::openProject() {
         atlasChoice_->addItems(atlases_.keys());
         if (settings.contains("pendingCandidate")) {
             candidateSettings_ = settings["pendingCandidate"].toObject();
+            regenerateLayerId_ = candidateSettings_.value("regenerateLayerId").toString();
+            reindexRegenerationTarget();
             candidate_ = QImage::fromData(
-                QByteArray::fromBase64(candidateSettings_["candidate"].toString().toLatin1()), "PNG");
+                QByteArray::fromBase64(candidateSettings_.value("candidate").toString().toLatin1()), "PNG");
             QImage mask = QImage::fromData(
-                QByteArray::fromBase64(candidateSettings_["mask"].toString().toLatin1()), "PNG");
+                QByteArray::fromBase64(candidateSettings_.value("mask").toString().toLatin1()), "PNG");
             capture_ = std::make_shared<AiCapture>(
                 aiCapture(*scene_, uv_->currentIndex(), atlases_,
-                          aiCameraFromJson(candidateSettings_["camera"].toObject())));
+                          aiCameraFromJson(candidateSettings_.value("camera").toObject())));
             candidateRetention_ = QImage::fromData(
-                QByteArray::fromBase64(candidateSettings_["retentionMask"].toString().toLatin1()), "PNG");
+                QByteArray::fromBase64(candidateSettings_.value("retentionMask").toString().toLatin1()),
+                "PNG");
             if (!candidateRetention_.isNull()) {
-                QImage sourceConfidence =
-                    QImage::fromData(QByteArray::fromBase64(
-                                         candidateSettings_["feedbackConfidenceImage"].toString().toLatin1()),
-                                     "PNG");
+                QImage sourceConfidence = QImage::fromData(
+                    QByteArray::fromBase64(
+                        candidateSettings_.value("feedbackConfidenceImage").toString().toLatin1()),
+                    "PNG");
                 if (candidateRetention_.size() != candidate_.size() ||
                     sourceConfidence.size() != candidate_.size())
                     throw std::runtime_error("Saved detail continuity data does not match the candidate");
@@ -2459,7 +3503,10 @@ void AiPanel::openProject() {
         updatePreview();
         refresh();
         status_->setText(parity_ ? "Project restored without running inference."
-                                : "Legacy project restored unchanged. Rebuild projection layers to use the corrected projection pipeline.");
+                                 : "Legacy project restored unchanged. Rebuild projection layers to use the "
+                                   "corrected projection pipeline.");
+        if (!pendingSmartFill_.empty())
+            prepareSmartFillPreview(pendingSmartFill_);
     } catch (const std::exception &e) {
         loading_ = false;
         status_->setText(QString::fromUtf8(e.what()));

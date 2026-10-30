@@ -7,6 +7,16 @@ struct AiLayerContribution {
     QMap<QString, QImage> materials;
 };
 
+// Geometric UV occupancy excludes projection padding. Chart IDs identify
+// edge-connected faces within one material/object; images and IDs are top-left.
+struct AiUvDomain {
+    QImage occupancy;
+    QVector<int> charts;
+};
+using AiUvDomains = QMap<QString, AiUvDomain>;
+AiUvDomains aiUvDomains(const Scene &, int uv, int resolution, const QSet<QString> &materials,
+                        std::atomic_bool *cancel = nullptr);
+
 // Initialization/destruction belong to the GUI thread. Rendering is synchronous
 // and may be requested from any thread; GL work belongs to its dedicated thread.
 // Source and camera masks use top-left image origins and normalized camera

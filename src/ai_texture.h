@@ -17,6 +17,7 @@ struct AiAtlas {
     QImage coverage;   // grayscale; padding never changes coverage
     QImage confidence; // linear 16-bit projection quality, separate from coverage and padding
     QVector<float> projectionWeight; // parity max weight, may exceed 1; confidence is its clamped guide preview
+    QImage repair; // Grayscale8 synthetic UV-repair provenance; never real projection quality
 };
 using AiAtlases = QMap<QString, AiAtlas>;
 struct AiCapture {
@@ -72,7 +73,8 @@ QImage aiComposeLocked(const AiCapture &, const AiLock &, const QImage &candidat
 // background or large bare-clay regions the model left unpainted (colourless, still at the clay brightness).
 QImage aiGeneratedPaintMask(const AiCapture &, const AiLock &, const QImage &candidate);
 QString aiMaterial(const Scene &, const Triangle &);
-QStringList validateAiMesh(const Scene &, int uv);
+// Blocking errors; non-blocking UV issues (overlaps, zero-area UV faces) go to warnings.
+QStringList validateAiMesh(const Scene &, int uv, QStringList *warnings = nullptr);
 AiCamera aiCamera(const Scene &, const OrbitCamera &, int size = 1024);
 // Fit the view-space bounding box to 95% of the square view, preserving direction and lens.
 // visibleOnly (orthographic) frames only the part of the box inside the current view.

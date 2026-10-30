@@ -612,22 +612,48 @@ void pad(AiAtlas &a, int radius, std::atomic_bool *cancel) {
 QString aiMaterial(const Scene &s, const Triangle &t) {
     return t.material >= 0 && t.material < s.materials.size() ? s.materials[t.material] : QString("Default");
 }
-QStringList validateAiMesh(const Scene &s, int uv) {
+QStringList validateAiMesh(const Scene &s, int uv, QStringList *warnings) {
     QStringList errors;
     QMap<QString, Scene> groups;
-    for (const Triangle &t : s.tris)
-        groups[aiMaterial(s, t)].tris.push_back(t);
+    QMap<QString, int> collapsed;
+    for (const Triangle &t : s.tris) {
+        const QString material = aiMaterial(s, t);
+        // Zero-area UV faces own no texels and projection skips them, so they cannot
+        // corrupt the atlas; generated meshes with quantized UVs routinely contain a few.
+        if (uv >= 0 && uv < (int)t.uv.size()) {
+            const auto &a = t.uv[uv];
+            if (std::isfinite(a[0].x + a[0].y + a[1].x + a[1].y + a[2].x + a[2].y) &&
+                fabsf(orient(a[0], a[1], a[2])) < 1e-16f) {
+                ++collapsed[material];
+                continue;
+            }
+        }
+        groups[material].tris.push_back(t);
+    }
     for (auto it = groups.begin(); it != groups.end(); ++it) {
         it->uvNames = s.uvNames;
         Settings settings;
         settings.maskUV = settings.aoUV = uv;
-        settings.averageOverlaps = false;
+        // Overlapping texels just receive the same projected paint twice: warn, don't block.
+        settings.averageOverlaps = true;
         const Validation v = validate(*it, settings);
         for (QString e : v.errors)
             errors << it.key() + ": " + e.replace("AO UV", "Texture UV");
+        if (warnings && !v.overlaps.empty())
+            *warnings << QString("%1: %2%3 overlapping Texture UV triangle pairs share paint.")
+                             .arg(it.key())
+                             .arg(v.overlapScanLimited ? "at least " : "")
+                             .arg(v.overlaps.size());
     }
+    if (warnings)
+        for (auto it = collapsed.begin(); it != collapsed.end(); ++it)
+            *warnings << QString("%1: %2 zero-area Texture UV triangles receive no paint.")
+                             .arg(it.key())
+                             .arg(it.value());
     if (s.tris.empty())
         errors << "The mesh contains no triangles.";
+    else if (groups.empty())
+        errors << "Every Texture UV triangle has zero area.";
     return errors;
 }
 AiCamera aiCamera(const Scene &s, const OrbitCamera &o, int size) {
@@ -1496,6 +1522,8 @@ QJsonArray aiSerializeAtlases(const AiAtlases &atlases) {
                 stream << value;
             image["projectionWeight"] = QString::fromLatin1(qCompress(weights).toBase64());
         }
+        if (!it->repair.isNull())
+            image["repair"] = QString::fromLatin1(png(it->repair));
         images.append(image);
     }
     return images;
@@ -1508,8 +1536,11 @@ AiAtlases aiDeserializeAtlases(const QJsonArray &images) {
                   unpng(j["coverage"]).convertToFormat(QImage::Format_Grayscale8)};
         if (j["confidence"].isString())
             a.confidence = unpng(j["confidence"]).convertToFormat(QImage::Format_Grayscale16);
+        if (j["repair"].isString())
+            a.repair = unpng(j["repair"]).convertToFormat(QImage::Format_Grayscale8);
         if (a.color.size() != a.coverage.size() || a.color.width() != a.color.height() ||
-            a.color.width() > 4096 || (!a.confidence.isNull() && a.confidence.size() != a.color.size()))
+            a.color.width() > 4096 || (!a.confidence.isNull() && a.confidence.size() != a.color.size()) ||
+            (!a.repair.isNull() && a.repair.size() != a.color.size()))
             fail("Invalid atlas size");
         if (j["projectionWeight"].isString()) {
             const QByteArray packed = QByteArray::fromBase64(j["projectionWeight"].toString().toLatin1());
@@ -1535,6 +1566,8 @@ AiAtlases aiDeserializeAtlases(const QJsonArray &images) {
 }
 AiAtlases aiComposeLayers(const AiAtlases &base, const QList<QJsonObject> &records, std::atomic_bool *cancel,
                           QCache<QByteArray, QByteArray> *decoded) {
+    if (std::any_of(records.cbegin(), records.cend(), aiIsRepairLayer))
+        return aiComposeLayerStack(base, records, false, cancel, decoded);
     if (std::any_of(records.begin(), records.end(), [](const QJsonObject &r) {
             return r["uvLayer"].toObject()["version"].toInt() == 2;
         }))
@@ -1637,6 +1670,10 @@ QList<QJsonObject> aiPrepareLayers(const Scene &scene, int uv, const AiAtlases &
     QList<QJsonObject> result;
     for (auto record : records) {
         checkCancel(cancel);
+        if (aiIsRepairLayer(record)) {
+            result << record;
+            continue;
+        }
         if (record["uvLayer"].toObject()["version"].toInt() == 2) {
             result << record;
             continue;
@@ -1681,8 +1718,10 @@ void aiSaveProject(const QString &path, const QJsonObject &settings, const AiAtl
     QJsonArray images = aiSerializeAtlases(atlases), history;
     for (const auto &p : projections)
         history.append(p);
+    const bool repairs = settings.contains("pendingSmartFill") ||
+                         std::any_of(projections.cbegin(), projections.cend(), aiIsRepairLayer);
     QJsonObject root{{"format", "FornaioAI"},
-                     {"version", settings["projectionBackend"] == "modddif-v1" ? 2 : 1},
+                     {"version", repairs ? 3 : settings["projectionBackend"] == "modddif-v1" ? 2 : 1},
                      {"settings", settings},
                      {"atlases", images},
                      {"projections", history}};
@@ -1701,7 +1740,7 @@ QJsonObject aiLoadProject(const QString &path, AiAtlases &atlases, QList<QJsonOb
     auto doc = QJsonDocument::fromJson(f.readAll(), &error);
     auto root = doc.object();
     if (error.error != QJsonParseError::NoError || root["format"] != "FornaioAI" ||
-        (root["version"] != 1 && root["version"] != 2))
+        (root["version"] != 1 && root["version"] != 2 && root["version"] != 3))
         fail("Unsupported AI project");
     AiAtlases loaded;
     QList<QJsonObject> history;

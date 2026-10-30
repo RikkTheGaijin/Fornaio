@@ -55,7 +55,132 @@ QImage cachedProjectionImage(const QJsonValue &value) {
 int byte(float v) {
     return std::clamp(qRound(v * 255), 0, 255);
 }
+
+// A preview atlas may carry synthetic pixels. They must not become ordinary
+// accepted paint when it is supplied as the base of another composition.
+AiAtlases withoutBaseRepairs(const AiAtlases &base, std::atomic_bool *cancel) {
+    AiAtlases result = base;
+    for (auto it = result.begin(); it != result.end(); ++it) {
+        auto &atlas = it.value();
+        if (atlas.repair.isNull())
+            continue;
+        if (atlas.repair.size() != atlas.color.size() || atlas.repair.format() != QImage::Format_Grayscale8)
+            fail("Invalid UV repair provenance");
+        const int n = atlas.color.width();
+        for (int y = 0; y < atlas.color.height(); ++y) {
+            check(cancel);
+            const auto *repair = atlas.repair.constScanLine(y);
+            for (int x = 0; x < n; ++x)
+                if (repair[x]) {
+                    atlas.color.setPixel(x, y, qRgb(128, 128, 128));
+                    atlas.coverage.scanLine(y)[x] = 0;
+                    if (!atlas.confidence.isNull())
+                        reinterpret_cast<quint16 *>(atlas.confidence.scanLine(y))[x] = 0;
+                    if (atlas.projectionWeight.size() == n * atlas.color.height())
+                        atlas.projectionWeight[y * n + x] = 0;
+                }
+        }
+        atlas.repair = QImage();
+    }
+    return result;
+}
+
+AiAtlases applyRepairs(const AiAtlases &ordinary, const QList<QJsonObject> &records,
+                       std::atomic_bool *cancel) {
+    AiAtlases result = ordinary;
+    for (const auto &record : records) {
+        check(cancel);
+        if (!aiIsRepairLayer(record) || !record["visible"].toBool(true))
+            continue;
+        const auto layer = record["uvLayer"].toObject();
+        if (layer["version"].toInt() != 2)
+            fail("Invalid UV repair layer");
+        const int n = layer["resolution"].toInt();
+        if (n < 1 || n > 4096)
+            fail("Invalid UV repair resolution");
+        const auto masks = record["uvMasks"].toObject();
+        QSet<QString> seen;
+        for (const auto &value : layer["materials"].toArray()) {
+            check(cancel);
+            const auto block = value.toObject();
+            const QString material = block["material"].toString();
+            if (seen.contains(material))
+                fail("Duplicate UV repair material");
+            seen.insert(material);
+            if (!result.contains(material))
+                fail("UV repair material does not match the atlas");
+            auto &atlas = result[material];
+            if (atlas.color.size() != QSize(n, n) || atlas.coverage.size() != QSize(n, n))
+                fail("UV repair layer does not match the atlas");
+            const QImage image = cachedProjectionImage(block["rgba"]);
+            if (image.size() != QSize(n, n))
+                fail("UV repair layer does not match the atlas");
+            const QImage mask = masks[material].isString()
+                                    ? cachedProjectionImage(masks[material]).convertToFormat(QImage::Format_Grayscale8)
+                                    : QImage();
+            if (!mask.isNull() && mask.size() != QSize(n, n))
+                fail("UV repair mask does not match the atlas");
+            if (atlas.repair.isNull()) {
+                atlas.repair = QImage(n, n, QImage::Format_Grayscale8);
+                atlas.repair.fill(0);
+            }
+            if (atlas.confidence.isNull()) {
+                atlas.confidence = QImage(n, n, QImage::Format_Grayscale16);
+                atlas.confidence.fill(0);
+                for (int y = 0; y < n; ++y) {
+                    auto *quality = reinterpret_cast<quint16 *>(atlas.confidence.scanLine(y));
+                    const auto *known = atlas.coverage.constScanLine(y);
+                    for (int x = 0; x < n; ++x)
+                        if (known[x])
+                            quality[x] = 32768;
+                }
+            }
+            // Keep this immutable copy: a later repair can replace an earlier
+            // repair, but never an ordinary projection or fixed base texel.
+            const QImage coverage = ordinary[material].coverage;
+            for (int y = 0; y < n; ++y) {
+                if (!(y & 31))
+                    check(cancel);
+                const auto *pixels = image.constScanLine(y);
+                const auto *known = coverage.constScanLine(y);
+                const auto *allowed = mask.isNull() ? nullptr : mask.constScanLine(y);
+                for (int x = 0; x < n; ++x) {
+                    const auto *pixel = pixels + x * 4;
+                    if (known[x] || !pixel[3] || (allowed && allowed[x] < 128))
+                        continue;
+                    atlas.color.setPixel(x, y, qRgb(pixel[0], pixel[1], pixel[2]));
+                    atlas.coverage.scanLine(y)[x] = 255;
+                    atlas.repair.scanLine(y)[x] = 255;
+                    reinterpret_cast<quint16 *>(atlas.confidence.scanLine(y))[x] = 1638; // .025, never legacy .5
+                }
+            }
+        }
+    }
+    check(cancel);
+    return result;
+}
 } // namespace
+
+bool aiIsRepairLayer(const QJsonObject &record) {
+    return record["kind"].toString() == "uv_fill";
+}
+
+AiAtlases aiWithoutRepairs(const AiAtlases &base, const QList<QJsonObject> &records, bool parity,
+                           std::atomic_bool *cancel, QCache<QByteArray, QByteArray> *decoded) {
+    check(cancel);
+    QList<QJsonObject> ordinary;
+    for (const auto &record : records)
+        if (!aiIsRepairLayer(record))
+            ordinary.append(record);
+    const AiAtlases cleanBase = withoutBaseRepairs(base, cancel);
+    return parity ? aiComposeParityLayers(cleanBase, ordinary, cancel)
+                  : aiComposeLayers(cleanBase, ordinary, cancel, decoded);
+}
+
+AiAtlases aiComposeLayerStack(const AiAtlases &base, const QList<QJsonObject> &records, bool parity,
+                              std::atomic_bool *cancel, QCache<QByteArray, QByteArray> *decoded) {
+    return applyRepairs(aiWithoutRepairs(base, records, parity, cancel, decoded), records, cancel);
+}
 
 AiLayerBlendSettings aiLayerBlendSettings(const QJsonObject &record) {
     const auto json = record["blending"].toObject();
@@ -105,6 +230,23 @@ AiLayerContribution aiDecodeProjectionLayer(const QJsonObject &layer) {
 QJsonObject aiBakeProjectionLayer(const Scene &scene, int uv, int resolution, QJsonObject record,
                                   std::atomic_bool *cancel) {
     check(cancel);
+    if (aiIsRepairLayer(record)) {
+        const auto layer = record["uvLayer"].toObject();
+        if (layer["resolution"].toInt() != resolution)
+            fail("UV repair layer does not match the atlas");
+        const auto repaired = aiDecodeProjectionLayer(layer);
+        // Masks can narrow a frozen repair, never add new eligibility.
+        const auto masks = record["uvMasks"].toObject();
+        for (auto it = masks.begin(); it != masks.end(); ++it) {
+            check(cancel);
+            if (!repaired.materials.contains(it.key()) || decode(it.value(), 4096).size() != QSize(resolution, resolution))
+                fail("UV repair mask does not match the atlas");
+        }
+        if (record["layerId"].toString().isEmpty())
+            record["layerId"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        check(cancel);
+        return record;
+    }
     const auto settings = aiLayerBlendSettings(record);
     auto source = record["sourceImage"];
     if (!source.isString())
@@ -139,6 +281,8 @@ QJsonObject aiBakeProjectionLayer(const Scene &scene, int uv, int resolution, QJ
 AiAtlases aiComposeParityLayers(const AiAtlases &base, const QList<QJsonObject> &records,
                                 std::atomic_bool *cancel) {
     check(cancel);
+    if (std::any_of(records.cbegin(), records.cend(), aiIsRepairLayer))
+        return aiComposeLayerStack(base, records, true, cancel);
     if (records.empty())
         return base;
     AiAtlases result = base;
@@ -227,6 +371,14 @@ QList<QJsonObject> aiRebuildProjectionLayers(const Scene &scene, int uv, int res
     QSet<QString> identities;
     for (auto record : records) {
         check(cancel);
+        if (aiIsRepairLayer(record)) {
+            if (identities.contains(record["layerId"].toString()))
+                record.remove("layerId");
+            auto repaired = aiBakeProjectionLayer(scene, uv, resolution, record, cancel);
+            identities.insert(repaired["layerId"].toString());
+            rebuilt.append(repaired);
+            continue;
+        }
         auto blending = record["blending"].toObject();
         // Legacy overlay weights included ownership and angle falloff. A rebuild
         // intentionally adopts the reference's default independent Blend layer.

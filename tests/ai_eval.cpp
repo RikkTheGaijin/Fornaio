@@ -6,18 +6,22 @@
 //   fornaio_ai_eval render  <mesh> <state.json> <yaw> <pitch> <out.png>  atlas seen from a camera (no
 //   lighting) fornaio_ai_eval ownproject <mesh> <state.json> <outdir> <generated.png>  the panel's GPT Image
 //   projection
+#include "ai_cloud.h"
 #include "ai_layers.h"
+#include "ai_smart_fill.h"
 #include "ai_texture.h"
 #include <QBuffer>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QJsonDocument>
 #include <QScopeGuard>
 #include <QSurfaceFormat>
+#include <QTimer>
 #include <cmath>
 #include <cstdio>
 
@@ -77,6 +81,218 @@ QString imageData(const QImage &image) {
     if (!image.save(&buffer, "PNG"))
         throw std::runtime_error("Cannot encode evaluation image");
     return QString::fromLatin1(bytes.toBase64());
+}
+void smartFillProbe(const QString &project, const QString &out, bool liveOne, bool prepareOnly = false,
+                    const QString &replayImage = {}) {
+    AiAtlases before;
+    QList<QJsonObject> records;
+    auto settings = aiLoadProject(project, before, records);
+    const QString meshPath =
+        QDir(QFileInfo(project).absolutePath()).absoluteFilePath(settings["mesh"].toString());
+    QFile meshFile(meshPath);
+    if (!meshFile.open(QIODevice::ReadOnly))
+        throw std::runtime_error("Cannot read Smart fill test mesh");
+    QCryptographicHash meshHash(QCryptographicHash::Sha256);
+    meshHash.addData(&meshFile);
+    if (QString::fromLatin1(meshHash.result().toHex()) != settings["meshSha256"].toString())
+        throw std::runtime_error("Smart fill test mesh fingerprint changed");
+    const Scene scene = loadScene(meshPath);
+    const int uv = settings["uv"].toInt(), resolution = settings["resolution"].toInt(2048);
+    const bool parity = settings["projectionBackend"] == "modddif-v1";
+    const auto base = settings["layerBase"].isArray() ? aiDeserializeAtlases(settings["layerBase"].toArray())
+                                                      : aiEmptyAtlases(scene, resolution);
+    QSet<QString> materials;
+    for (auto it = before.begin(); it != before.end(); ++it)
+        materials.insert(it.key());
+    QDir().mkpath(out);
+    QElapsedTimer timer;
+    timer.start();
+    const auto domains = aiUvDomains(scene, uv, resolution, materials);
+    auto plan = aiPlanSmartFill(scene, uv, before, domains, materials,
+                                aiSmartFillFingerprint(scene, uv, before, records, parity));
+    const int requestCount = aiSmartFillRemaining(plan);
+    const int livePatch = qEnvironmentVariableIntValue("FORNAIO_SMART_FILL_PATCH");
+    if ((liveOne || prepareOnly) && (livePatch < 0 || livePatch >= requestCount))
+        throw std::runtime_error("Invalid live Smart fill sample patch");
+    AiCamera inspection = settings["camera"].isObject() ? aiCameraFromJson(settings["camera"].toObject())
+                                                        : camera(scene, 20, 15);
+    const QImage appearance = aiCapture(scene, uv, before, inspection).partial;
+    if (prepareOnly) {
+        const auto request = aiSmartFillRequest(plan, livePatch, out, appearance);
+        QFile requestFile(out + "/request.json");
+        if (!requestFile.open(QIODevice::WriteOnly))
+            throw std::runtime_error("Cannot save prepared Smart fill request");
+        requestFile.write(QJsonDocument(request).toJson());
+        const auto images = request["images"].toArray();
+        save(QImage(images[0].toString()), out + "/texture-board.png");
+        save(QImage(images[1].toString()), out + "/repair-map.png");
+        save(QImage(images[2].toString()), out + "/appearance.png");
+        save(QImage(request["mask"].toString()), out + "/api-mask.png");
+        std::printf("Prepared request %d of %d; no generation performed.\n", livePatch + 1, requestCount);
+        return;
+    }
+    int completed = 0;
+    qint64 acceptanceMilliseconds = 0;
+    QImage lastGenerated;
+    for (int i = 0; i < plan["patches"].toArray().size(); ++i) {
+        if (liveOne && i != livePatch)
+            continue;
+        const QString patchDirectory = out + QString("/patch-%1").arg(i);
+        QDir().mkpath(patchDirectory);
+        const auto request = aiSmartFillRequest(plan, i, patchDirectory, appearance);
+        QImage generated;
+        if (liveOne) {
+            AiCloudImage cloud;
+            if (cloud.backend() == AiCloudImage::Backend::None)
+                throw std::runtime_error("No GPT Image 2 backend is available");
+            QEventLoop loop;
+            QString error;
+            QObject::connect(&cloud, &AiCloudImage::event, &loop, [&](const QJsonObject &event) {
+                if (event["event"] == "error") {
+                    error = event["message"].toString();
+                    loop.quit();
+                }
+                if (event["event"] == "result") {
+                    generated = QImage(event["output"].toString());
+                    loop.quit();
+                }
+            });
+            QTimer deadline;
+            deadline.setSingleShot(true);
+            QObject::connect(&deadline, &QTimer::timeout, &loop, [&] {
+                error = "Smart fill live sample timed out";
+                cloud.cancel();
+                loop.quit();
+            });
+            deadline.start(600000);
+            cloud.generate(request);
+            loop.exec();
+            if (!error.isEmpty())
+                throw std::runtime_error(error.toStdString());
+            if (generated.isNull())
+                throw std::runtime_error("Smart fill live sample returned no image");
+        } else if (!replayImage.isEmpty()) {
+            generated = QImage(replayImage);
+            if (generated.isNull())
+                throw std::runtime_error("Cannot load cached Smart fill result");
+        } else {
+            // Deliberately repaint every returned pixel. Native acceptance must
+            // discard those changes everywhere except the frozen missing texels.
+            generated = QImage(1024, 1024, QImage::Format_RGB32);
+            generated.fill(QColor(45, 220, 165));
+            save(generated, patchDirectory + "/synthetic-output.png");
+        }
+        QElapsedTimer acceptance;
+        lastGenerated = generated;
+        acceptance.start();
+        plan = aiSmartFillAcceptPatch(plan, i, generated);
+        acceptanceMilliseconds += acceptance.elapsed();
+        ++completed;
+        if (liveOne)
+            break; // Bounded live quality probe: exactly one request.
+    }
+    const auto repair = aiSmartFillLayer(plan);
+    auto afterRecords = records;
+    int repairIndex = 0;
+    while (repairIndex < afterRecords.size() && aiIsRepairLayer(afterRecords[repairIndex]))
+        ++repairIndex;
+    afterRecords.insert(repairIndex, repair);
+    const auto after = aiComposeLayerStack(base, afterRecords, parity);
+    qint64 changedKnown = 0, changedOutside = 0, missingBefore = 0, missingAfter = 0, painted = 0;
+    double rawSeamError = 0, matchedSeamError = 0;
+    qint64 seamSamples = 0;
+    int m = 0;
+    for (auto it = before.begin(); it != before.end(); ++it) {
+        const auto &fresh = after[it.key()];
+        const auto &domain = domains[it.key()].occupancy;
+        const QString prefix = out + QString("/atlas-%1").arg(m++);
+        QImage raw;
+        const auto panel = plan["layout"].toObject()[it.key()].toArray();
+        const int boardSize = plan["boardSize"].toInt();
+        if (panel.size() == 4 && boardSize && !lastGenerated.isNull()) {
+            const int left = qRound(double(panel[0].toInt()) * lastGenerated.width() / boardSize);
+            const int top = qRound(double(panel[1].toInt()) * lastGenerated.height() / boardSize);
+            const int right =
+                qRound(double(panel[0].toInt() + panel[2].toInt()) * lastGenerated.width() / boardSize);
+            const int bottom =
+                qRound(double(panel[1].toInt() + panel[3].toInt()) * lastGenerated.height() / boardSize);
+            raw = lastGenerated.copy(QRect(left, top, right - left, bottom - top))
+                      .scaled(it->color.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            save(raw, prefix + "-raw-candidate.png");
+        }
+        save(it->color, prefix + "-before.png");
+        save(fresh.color, prefix + "-after.png");
+        save(domain, prefix + "-domain.png");
+        save(QImage::fromData(
+                 QByteArray::fromBase64(plan["eligibleMasks"].toObject()[it.key()].toString().toLatin1())),
+             prefix + "-gaps.png");
+        save(fresh.repair, prefix + "-repairs.png");
+        for (int y = 0; y < resolution; ++y)
+            for (int x = 0; x < resolution; ++x) {
+                const bool known = it->coverage.constScanLine(y)[x] != 0,
+                           inside = domain.constScanLine(y)[x] != 0;
+                const bool different = it->color.pixel(x, y) != fresh.color.pixel(x, y);
+                changedKnown += known && different;
+                changedOutside += !inside && different;
+                missingBefore += inside && !known;
+                missingAfter += inside && !fresh.coverage.constScanLine(y)[x];
+                painted += inside && !known && fresh.coverage.constScanLine(y)[x];
+                if (!raw.isNull() && inside && !known && fresh.coverage.constScanLine(y)[x]) {
+                    const auto &charts = domains[it.key()].charts;
+                    for (auto delta : {QPoint(-1, 0), QPoint(1, 0), QPoint(0, -1), QPoint(0, 1)}) {
+                        const int nx = x + delta.x(), ny = y + delta.y();
+                        if (nx < 0 || ny < 0 || nx >= resolution || ny >= resolution ||
+                            !it->coverage.constScanLine(ny)[nx] ||
+                            charts[ny * resolution + nx] != charts[y * resolution + x])
+                            continue;
+                        const QRgb reference = it->color.pixel(nx, ny);
+                        const QRgb candidate = raw.pixel(x, y), repaired = fresh.color.pixel(x, y);
+                        rawSeamError += std::abs(qRed(candidate) - qRed(reference)) +
+                                        std::abs(qGreen(candidate) - qGreen(reference)) +
+                                        std::abs(qBlue(candidate) - qBlue(reference));
+                        matchedSeamError += std::abs(qRed(repaired) - qRed(reference)) +
+                                            std::abs(qGreen(repaired) - qGreen(reference)) +
+                                            std::abs(qBlue(repaired) - qBlue(reference));
+                        seamSamples += 3;
+                    }
+                }
+            }
+    }
+    int view = 0;
+    for (auto angles :
+         {QPointF(17.5, 15.5), QPointF(90, 0), QPointF(-90, 0), QPointF(15, -35), QPointF(20, 65)}) {
+        const auto c = camera(scene, float(angles.x()), float(angles.y()));
+        save(aiCapture(scene, uv, before, c).partial, out + QString("/view-%1-before.png").arg(view));
+        save(aiCapture(scene, uv, after, c).partial, out + QString("/view-%1-after.png").arg(view++));
+    }
+    settings["mesh"] = QDir(out).relativeFilePath(meshPath);
+    settings["pendingSmartFill"] = plan;
+    aiSaveProject(out + "/smart-fill-copy.fornaioai", settings, after, afterRecords);
+    QFile planFile(out + "/plan.json");
+    if (!planFile.open(QIODevice::WriteOnly))
+        throw std::runtime_error("Cannot save repair plan");
+    planFile.write(QJsonDocument(plan).toJson(QJsonDocument::Compact));
+    QJsonObject report{{"requestCount", requestCount},
+                       {"completed", completed},
+                       {"live", liveOne},
+                       {"cachedGeneration", !replayImage.isEmpty()},
+                       {"acceptanceMilliseconds", acceptanceMilliseconds},
+                       {"rawBoundaryMeanError", seamSamples ? rawSeamError / seamSamples : 0},
+                       {"matchedBoundaryMeanError", seamSamples ? matchedSeamError / seamSamples : 0},
+                       {"boundaryChannelSamples", seamSamples},
+                       {"changedKnown", changedKnown},
+                       {"changedOutside", changedOutside},
+                       {"missingBefore", missingBefore},
+                       {"missingAfter", missingAfter},
+                       {"painted", painted},
+                       {"milliseconds", timer.elapsed()}};
+    QFile reportFile(out + "/report.json");
+    if (!reportFile.open(QIODevice::WriteOnly))
+        throw std::runtime_error("Cannot save Smart fill probe report");
+    reportFile.write(QJsonDocument(report).toJson());
+    std::printf("%s\n", QJsonDocument(report).toJson(QJsonDocument::Compact).constData());
+    if (changedKnown || changedOutside)
+        throw std::runtime_error("Smart fill modified protected pixels");
 }
 void replay(const QString &project, const QString &out) {
     AiAtlases before;
@@ -172,6 +388,16 @@ int main(int argc, char **argv) {
         if (args.size() < 4)
             throw std::runtime_error("usage: capture|project|render <mesh> <state.json> ...");
         const QString command = args[1];
+        if (command == "smartfill-replay" && args.size() == 5) {
+            smartFillProbe(args[2], args[4], false, false, args[3]);
+            return 0;
+        }
+        if ((command == "smartfill-probe" || command == "smartfill-live-one" ||
+             command == "smartfill-prepare") &&
+            args.size() == 4) {
+            smartFillProbe(args[2], args[3], command == "smartfill-live-one", command == "smartfill-prepare");
+            return 0;
+        }
         if (command == "replay" && args.size() == 4) {
             replay(args[2], args[3]);
             return 0;

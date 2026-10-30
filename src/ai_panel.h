@@ -2,6 +2,7 @@
 #include "ai_cloud.h"
 #include "ai_runtime.h"
 #include "ai_texture.h"
+#include <QPointer>
 #include <QTemporaryDir>
 #include <QWidget>
 #include <optional>
@@ -18,6 +19,7 @@ class QSpinBox;
 class QTabWidget;
 class QTabBar;
 class AiMaskCanvas;
+class QDialog;
 
 class AiPanel : public QWidget {
     Q_OBJECT
@@ -57,6 +59,30 @@ class AiPanel : public QWidget {
     std::shared_ptr<AiCapture> capture_;
     QImage candidate_, candidateRetention_;
     QJsonObject candidateSettings_, pending_;
+    QJsonObject pendingSmartFill_; // Independent of the pending camera candidate.
+    QPointer<QDialog> smartFillDialog_;
+    AiMaskCanvas *smartFillCanvas_ = nullptr;
+    TransferViewport *smartFillView_ = nullptr;
+    QComboBox *smartFillMaterial_ = nullptr;
+    QLabel *smartFillInfo_ = nullptr;
+    QPushButton *smartFillGenerate_ = nullptr, *smartFillApply_ = nullptr, *smartFillDiscard_ = nullptr,
+                *smartFillReplan_ = nullptr, *smartFillReprocess_ = nullptr;
+    bool smartFillActive_ = false;
+    enum class SmartFillPhase { Idle, Planning, Preview, Request, Provider, Processing, Applying };
+    SmartFillPhase smartFillPhase_ = SmartFillPhase::Idle;
+    struct SmartFillPreviewData {
+        QJsonObject plan;
+        AiAtlases atlases;
+        QMap<QString, QImage> masks, eligibility;
+        QByteArray stateKey, fingerprint;
+    };
+    std::shared_ptr<SmartFillPreviewData> smartFillPreview_;
+    const SmartFillPreviewData *smartFillRendered_ = nullptr;
+    QString smartFillRenderedMaterial_;
+    bool smartFillPreviewDeferred_ = false;
+    int smartFillPatch_ = -1;
+    QString smartFillRequestId_;
+    std::unique_ptr<QTemporaryDir> smartFillWork_;
     AiManifest manifest_;
     AiHardware hardware_;
     AiInstaller installer_;
@@ -69,7 +95,8 @@ class AiPanel : public QWidget {
     bool busy_ = false, externalBusy_ = false, automatic_ = false, loading_ = false, setupLease_ = false;
     QList<OrbitCamera> cameras_, multiviewCameras_;
     int cameraIndex_ = 0;
-    int regenerateIndex_ = -1; // Layer being regenerated in place; -1 for a new projection.
+    int regenerateIndex_ = -1;  // Layer being regenerated in place; -1 for a new projection.
+    QString regenerateLayerId_; // Stable while a camera replacement candidate remains pending.
     int lastGenerationSeed_ = -1;
     quint64 revision_ = 0, requestSerial_ = 0;
     QStringList meshErrors_;
@@ -90,15 +117,14 @@ class AiPanel : public QWidget {
     QComboBox *layerMode_;
     QSpinBox *layerStrength_, *layerDepthMargin_;
     QCheckBox *layerIsolate_;
-    QPushButton *deleteLayer_, *rebuildLayers_;
+    QPushButton *deleteLayer_, *rebuildLayers_, *smartFill_;
     QComboBox *uv_, *resolution_, *generationResolution_, *profile_, *atlasChoice_, *display_, *blendMode_;
     QSpinBox *seed_, *brush_, *projectionStrength_, *projectionFeather_, *angleFalloff_, *continuity_,
         *projectionAngle_, *cameraFov_;
-    QCheckBox *colorMatch_, *randomSeed_, *showUncovered_, *protectDetails_,
-        *fillGaps_, *coverAll_, *orthographic_;
+    QCheckBox *colorMatch_, *randomSeed_, *showUncovered_, *protectDetails_, *fillGaps_, *coverAll_,
+        *orthographic_;
     QProgressBar *progress_;
-    QPushButton *install_, *cancelButton_, *generate_, *project_, *undoButton_, *redoButton_,
-        *export_;
+    QPushButton *install_, *cancelButton_, *generate_, *project_, *undoButton_, *redoButton_, *export_;
     QTabWidget *previews_;
     QTabBar *generationMode_;
     int generationSeed();
@@ -114,13 +140,33 @@ class AiPanel : public QWidget {
     HistoryState historyState() const;
     void restoreHistory(const HistoryState &);
     void refreshLayerTools();
-    void applyLayerEdit(QList<QJsonObject>, int rebakeIndex, int selected,
-                        const QString &message, const QString &isolation, bool rebuild = false);
+    void applyLayerEdit(QList<QJsonObject>, int rebakeIndex, int selected, const QString &message,
+                        const QString &isolation, bool rebuild = false);
     void deleteLayer(int index);
     void moveLayer(int index, int offset);
     void replaceLayerImage(int index);
     void editLayerMask(int index, bool uv);
     void rebuildProjectionLayers();
+    void startSmartFill();
+    void prepareSmartFill(const QString &replaceLayer = {});
+    void showSmartFill();
+    void refreshSmartFill();
+    QByteArray smartFillStateKey() const;
+    bool smartFillPreviewMatches() const;
+    static std::shared_ptr<SmartFillPreviewData>
+    makeSmartFillPreview(const QJsonObject &, const Scene &, int uv, const AiAtlases &,
+                         const QList<QJsonObject> &, bool parity, const QByteArray &stateKey,
+                         std::atomic_bool *cancel, const QByteArray &fingerprint = {});
+    void prepareSmartFillPreview(QJsonObject plan, bool replacePending = false);
+    bool smartFillStale() const;
+    void smartFillGenerate();
+    void smartFillRequest();
+    void smartFillEvent(const QJsonObject &);
+    void processSmartFillResult(const QString &path = {});
+    void smartFillReprocess();
+    void smartFillStop(const QString &);
+    void smartFillApply();
+    void smartFillDiscard();
     void setBusy(bool);
     QSet<QString> selectedMaterials() const;
     QStringList referencePaths() const;
@@ -129,6 +175,8 @@ class AiPanel : public QWidget {
     void refreshMultiviewViews();
     std::optional<float> frontYaw(int excludeLayer = -1) const;
     void regenerateLayer(int index);
+    void rememberRegenerationTarget();
+    void reindexRegenerationTarget();
     void nextCamera();
     void receiveCapture(std::shared_ptr<AiCapture>, double contribution);
     void workerEvent(const QJsonObject &);

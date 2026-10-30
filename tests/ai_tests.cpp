@@ -1,11 +1,13 @@
 #include "ai_panel.h"
 #include "ai_layers.h"
+#include "ai_smart_fill.h"
 #include <QApplication>
 #include <QBuffer>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QDialog>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
@@ -16,6 +18,7 @@
 #include <QListWidget>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QScopeGuard>
 #include <QSettings>
@@ -682,6 +685,653 @@ static void savedProjectGapProbe(const QString &path, const QString &root) {
 class AiTests : public QObject {
     Q_OBJECT
   private slots:
+    void smartFillWorkflowPreservesPaintAndPendingCamera() {
+        qputenv("FORNAIO_GPT_BACKEND", "fake");
+        const auto restore = qScopeGuard([] { qunsetenv("FORNAIO_GPT_BACKEND"); });
+        AiPanel p;
+        QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.resolution_->setCurrentIndex(p.resolution_->findData(1024));
+        const auto material = p.atlases_.firstKey();
+        paintAtlas(p.atlases_[material], qRgb(190, 80, 50));
+        for (int y = 500; y < 508; ++y)
+            for (int x = 500; x < 508; ++x) {
+                p.atlases_[material].coverage.scanLine(y)[x] = 0;
+                reinterpret_cast<quint16 *>(p.atlases_[material].confidence.scanLine(y))[x] = 0;
+            }
+        p.layerBase_ = p.atlases_;
+        const auto original = p.atlases_;
+        p.capture_ = std::make_shared<AiCapture>(capture(*p.scene_, p.atlases_, 128));
+        p.candidate_ = solid(128, qRgb(70, 20, 180));
+        p.candidateSettings_ = {{"id", "keep-camera-candidate"},
+                                {"camera", aiCameraJson(p.capture_->camera)}};
+        const auto cameraCandidate = p.candidate_;
+        const auto cameraSettings = p.candidateSettings_;
+        p.startSmartFill();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 20000);
+        QVERIFY2(!p.pendingSmartFill_.empty(), qPrintable(p.status_->text()));
+        QVERIFY(!p.smartFillStale());
+        QCOMPARE(aiSmartFillRemaining(p.pendingSmartFill_), 1);
+        QVERIFY(p.smartFillDialog_);
+        QCOMPARE(p.candidate_, cameraCandidate);
+        QCOMPARE(p.candidateSettings_, cameraSettings);
+        p.smartFillDialog_->grab().save(".ai-qa/smart-fill-dialog.png");
+        p.smartFillGenerate();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QCOMPARE(aiSmartFillRemaining(p.pendingSmartFill_), 0);
+        QCOMPARE(p.atlases_.first().color, original.first().color);
+        p.smartFillApply();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QVERIFY(p.pendingSmartFill_.empty());
+        QCOMPARE(p.projections_.size(), 1);
+        QVERIFY(aiIsRepairLayer(p.projections_[0]));
+        QVERIFY(p.atlases_[material].coverage.constScanLine(504)[504]);
+        QVERIFY(p.atlases_[material].repair.constScanLine(504)[504]);
+        for (int y = 0; y < 1024; ++y)
+            for (int x = 0; x < 1024; ++x)
+                if (original[material].coverage.constScanLine(y)[x])
+                    QCOMPARE(p.atlases_[material].color.pixel(x, y), original[material].color.pixel(x, y));
+        QCOMPARE(p.candidate_, cameraCandidate);
+        QCOMPARE(p.candidateSettings_, cameraSettings);
+        const auto filled = p.atlases_;
+        p.undoButton_->click();
+        QCOMPARE(p.atlases_.first().coverage, original.first().coverage);
+        QVERIFY(p.projections_.empty());
+        p.redoButton_->click();
+        QCOMPARE(p.atlases_.first().color, filled.first().color);
+        p.setLayerVisible(0, false);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 10000);
+        QCOMPARE(p.atlases_.first().coverage, original.first().coverage);
+        p.deleteLayer(0);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 10000);
+        QVERIFY(p.projections_.empty());
+    }
+    void smartFillPendingStaleAndSaveRoundTrip() {
+        qputenv("FORNAIO_GPT_BACKEND", "fake");
+        const auto restore = qScopeGuard([] { qunsetenv("FORNAIO_GPT_BACKEND"); });
+        QTemporaryDir dir;
+        AiPanel p;
+        QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.resolution_->setCurrentIndex(p.resolution_->findData(1024));
+        const auto material = p.atlases_.firstKey();
+        paintAtlas(p.atlases_[material], qRgb(160, 70, 30));
+        p.atlases_[material].coverage.scanLine(512)[512] = 0;
+        p.layerBase_ = p.atlases_;
+        p.startSmartFill();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 20000);
+        QVERIFY(!p.pendingSmartFill_.empty());
+        p.smartFillGenerate();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        const auto pending = p.pendingSmartFill_;
+        const auto accepted = p.atlases_;
+        p.atlases_[material].color.setPixel(0, 0, qRgb(0, 0, 255));
+        QVERIFY(p.smartFillStale());
+        p.smartFillApply();
+        QVERIFY(p.projections_.empty());
+        QVERIFY(!p.pendingSmartFill_.empty());
+        p.atlases_ = accepted;
+        QVERIFY(!p.smartFillStale());
+        if (p.smartFillDialog_)
+            p.smartFillDialog_->close();
+        QCoreApplication::processEvents();
+        const auto path = dir.filePath("pending-smart.fornaioai");
+        auto choose = [path] {
+            auto dialog = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            dialog->selectFile(path);
+            QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+        };
+        QTimer::singleShot(0, &p, choose);
+        p.saveProject();
+        QVERIFY(QFileInfo::exists(path));
+        p.pendingSmartFill_ = {};
+        QTimer::singleShot(0, &p, choose);
+        p.openProject();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QCOMPARE(p.pendingSmartFill_["patches"], pending["patches"]);
+        QVERIFY(!p.smartFillStale());
+        p.smartFillApply();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QCOMPARE(p.projections_.size(), 1);
+        QVERIFY(aiIsRepairLayer(p.projections_[0]));
+    }
+    void smartFillUsesOneGenerationForAllGapsAndCanRetryAfterCancellation() {
+        qputenv("FORNAIO_GPT_BACKEND", "fake");
+        const auto restore = qScopeGuard([] { qunsetenv("FORNAIO_GPT_BACKEND"); });
+        AiPanel p;
+        QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.resolution_->setCurrentIndex(p.resolution_->findData(1024));
+        const QString material = p.atlases_.firstKey();
+        paintAtlas(p.atlases_[material], qRgb(190, 80, 50));
+        for (const int start : {50, 800, 950})
+            for (int y = 500; y < 508; ++y)
+                for (int x = start; x < start + 8; ++x) {
+                    p.atlases_[material].coverage.scanLine(y)[x] = 0;
+                    reinterpret_cast<quint16 *>(p.atlases_[material].confidence.scanLine(y))[x] = 0;
+                }
+        p.layerBase_ = p.atlases_;
+        const auto before = p.atlases_;
+        p.startSmartFill();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 20000);
+        QCOMPARE(p.pendingSmartFill_["version"].toInt(), 2);
+        QCOMPARE(aiSmartFillRemaining(p.pendingSmartFill_), 1);
+        const auto planned = p.pendingSmartFill_;
+        QSignalSpy providerEvents(&p.cloud_, &AiCloudImage::event);
+        // Cancellation keeps the one combined request available for an explicit retry.
+        p.smartFillGenerate();
+        p.cancelJob();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QCOMPARE(aiSmartFillRemaining(p.pendingSmartFill_), 1);
+        QCOMPARE(p.pendingSmartFill_["patches"].toArray().size(), 1);
+        QCOMPARE(p.pendingSmartFill_["masks"], planned["masks"]);
+        QCOMPARE(p.atlases_[material].color, before[material].color);
+        QCOMPARE(p.atlases_[material].coverage, before[material].coverage);
+        QVERIFY(!p.smartFillApply_->isEnabled());
+        QCOMPARE(p.smartFillGenerate_->text(), QString("Retry generation"));
+        p.smartFillGenerate();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QTest::qWait(150); // No automatic follow-up request may start after the single result.
+        int results = 0;
+        for (const auto &arguments : providerEvents)
+            results += arguments[0].toJsonObject()["event"] == "result";
+        QCOMPARE(results, 1);
+        QCOMPARE(aiSmartFillRemaining(p.pendingSmartFill_), 0);
+        QCOMPARE(p.pendingSmartFill_["patches"].toArray().size(), 1);
+        QCOMPARE(p.atlases_[material].color, before[material].color);
+        const auto preview = aiSmartFillPreview(before, p.pendingSmartFill_);
+        for (const int x : {54, 804, 954})
+            QVERIFY(preview[material].coverage.constScanLine(504)[x]);
+        p.smartFillApply();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QVERIFY(p.pendingSmartFill_.empty());
+        QCOMPARE(p.projections_.size(), 1);
+        for (const int x : {54, 804, 954})
+            QVERIFY(p.atlases_[material].coverage.constScanLine(504)[x]);
+        for (int y = 0; y < 1024; ++y)
+            for (int x = 0; x < 1024; ++x)
+                if (before[material].coverage.constScanLine(y)[x])
+                    QCOMPARE(p.atlases_[material].color.pixel(x, y), before[material].color.pixel(x, y));
+        p.undoButton_->click();
+        QCOMPARE(p.atlases_[material].coverage, before[material].coverage);
+    }
+    void smartFillProcessingAndApplyRemainResponsiveAndCancelAtomically() {
+        qputenv("FORNAIO_GPT_BACKEND", "fake");
+        const auto restore = qScopeGuard([] { qunsetenv("FORNAIO_GPT_BACKEND"); });
+        AiPanel p;
+        QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.resolution_->setCurrentIndex(p.resolution_->findData(2048));
+        const QString material = p.atlases_.firstKey();
+        paintAtlas(p.atlases_[material], qRgb(190, 80, 50));
+        for (int y = 256; y < 1792; ++y)
+            for (int x = 256; x < 1792; ++x) {
+                p.atlases_[material].coverage.scanLine(y)[x] = 0;
+                reinterpret_cast<quint16 *>(p.atlases_[material].confidence.scanLine(y))[x] = 0;
+            }
+        p.layerBase_ = p.atlases_;
+        const auto original = p.atlases_;
+        p.startSmartFill();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        int providerResults = 0, cancelledHeartbeats = 0;
+        const auto cancelProcessing =
+            connect(&p.cloud_, &AiCloudImage::event, &p,
+                    [&p, &providerResults, &cancelledHeartbeats](const QJsonObject &event) {
+                        if (event.value("event") != "result")
+                            return;
+                        ++providerResults;
+                        QCOMPARE(p.smartFillPhase_, AiPanel::SmartFillPhase::Processing);
+                        QTimer::singleShot(0, &p, [&p, &cancelledHeartbeats] {
+                            ++cancelledHeartbeats;
+                            QVERIFY(p.busy_);
+                            QCOMPARE(p.progress_->maximum(), 0);
+                            p.cancelJob();
+                        });
+                    });
+        p.smartFillGenerate();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        disconnect(cancelProcessing);
+        QCOMPARE(providerResults, 1);
+        QCOMPARE(cancelledHeartbeats, 1);
+        QCOMPARE(p.atlases_[material].color, original[material].color);
+        QCOMPARE(p.atlases_[material].coverage, original[material].coverage);
+        QVERIFY(p.projections_.empty());
+        QVERIFY(!p.pendingSmartFill_.value("patches")
+                     .toArray()
+                     .first()
+                     .toObject()
+                     .value("generated")
+                     .toString()
+                     .isEmpty());
+        QCOMPARE(aiSmartFillRemaining(p.pendingSmartFill_), 1);
+        QCOMPARE(p.smartFillGenerate_->text(), QString("Retry processing"));
+        QCOMPARE(p.progress_->maximum(), 1000);
+        int processingBeats = 0, applyingBeats = 0;
+        QTimer heartbeat;
+        heartbeat.setInterval(1);
+        connect(&heartbeat, &QTimer::timeout, &p, [&] {
+            processingBeats += p.smartFillPhase_ == AiPanel::SmartFillPhase::Processing;
+            applyingBeats += p.smartFillPhase_ == AiPanel::SmartFillPhase::Applying;
+        });
+        heartbeat.start();
+        QSignalSpy repeatedProviderEvents(&p.cloud_, &AiCloudImage::event);
+        p.smartFillGenerate(); // Reuses the checkpointed image; no provider request.
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 60000);
+        QVERIFY(processingBeats > 0);
+        QCOMPARE(repeatedProviderEvents.size(), 0);
+        QCOMPARE(aiSmartFillRemaining(p.pendingSmartFill_), 0);
+        QCOMPARE(p.pendingSmartFill_.value("matchingVersion").toInt(), 2);
+        p.smartFillApply();
+        QVERIFY(p.busy_);
+        QTimer::singleShot(0, &p, [&p] { p.cancelJob(); });
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QVERIFY(p.projections_.empty());
+        QVERIFY(!p.pendingSmartFill_.empty());
+        QCOMPARE(p.atlases_[material].color, original[material].color);
+        QCOMPARE(p.atlases_[material].coverage, original[material].coverage);
+        p.smartFillApply();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        heartbeat.stop();
+        QVERIFY(applyingBeats > 0);
+        QVERIFY(p.pendingSmartFill_.empty());
+        QCOMPARE(p.projections_.size(), 1);
+        QVERIFY(p.atlases_[material].coverage.constScanLine(1024)[1024]);
+        for (int y = 0; y < 2048; ++y)
+            for (int x = 0; x < 2048; ++x)
+                if (original[material].coverage.constScanLine(y)[x])
+                    QCOMPARE(p.atlases_[material].color.pixel(x, y), original[material].color.pixel(x, y));
+        QCOMPARE(p.progress_->maximum(), 1000);
+    }
+    void smartFillCachedSceneProcessingProbe() {
+        const QString scenePath = qEnvironmentVariable("FORNAIO_SMART_FILL_SCENE");
+        const QString imagePath = qEnvironmentVariable("FORNAIO_SMART_FILL_IMAGE");
+        if (scenePath.isEmpty() || imagePath.isEmpty())
+            QSKIP("Set FORNAIO_SMART_FILL_SCENE and FORNAIO_SMART_FILL_IMAGE for the cached UI probe.");
+        const QByteArray previousBackend = qgetenv("FORNAIO_GPT_BACKEND");
+        qputenv("FORNAIO_GPT_BACKEND", "none");
+        const auto restore = qScopeGuard([previousBackend] {
+            if (previousBackend.isNull())
+                qunsetenv("FORNAIO_GPT_BACKEND");
+            else
+                qputenv("FORNAIO_GPT_BACKEND", previousBackend);
+        });
+        auto fingerprint = [](const QString &path) {
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly))
+                return QByteArray();
+            QCryptographicHash hash(QCryptographicHash::Sha256);
+            hash.addData(&file);
+            return hash.result();
+        };
+        const auto originalProjectHash = fingerprint(scenePath);
+        const auto originalImageHash = fingerprint(imagePath);
+        QVERIFY(!originalProjectHash.isEmpty());
+        QVERIFY(!originalImageHash.isEmpty());
+        AiPanel p;
+        p.resize(1420, 900);
+        p.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&p));
+        auto choose = [&p](const QString &path) {
+            const QString absolutePath = QFileInfo(path).absoluteFilePath();
+            QTimer::singleShot(0, &p, [absolutePath] {
+                auto dialog = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+                QVERIFY(dialog);
+                dialog->setOption(QFileDialog::DontConfirmOverwrite);
+                dialog->selectFile(absolutePath);
+                QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+            });
+        };
+        choose(scenePath);
+        p.openProject();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 60000);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.view_->texturesDirty_, 30000);
+        QVERIFY2(p.scene_ && !p.atlases_.empty(), qPrintable(p.status_->text()));
+        QVERIFY(p.meshErrors_.empty());
+        const auto originalMeshHash = fingerprint(p.meshPath_);
+        QVERIFY(!originalMeshHash.isEmpty());
+        const auto before = p.atlases_;
+        const auto originalLayers = p.projections_;
+        const auto originalCandidate = p.candidate_;
+        const auto originalCandidateSettings = p.candidateSettings_;
+        const auto originalCapture = p.capture_;
+        const int originalUndoCount = p.undo_.size();
+        QSignalSpy providerEvents(&p.cloud_, &AiCloudImage::event);
+        QElapsedTimer phaseTimer, heartbeatClock;
+        qint64 processingHeartbeats = 0, applyingHeartbeats = 0;
+        qint64 maximumProcessingGap = 0, maximumApplyingGap = 0, previousBeat = 0;
+        auto previousPhase = AiPanel::SmartFillPhase::Idle;
+        QTimer heartbeat;
+        heartbeat.setInterval(10);
+        heartbeatClock.start();
+        connect(&heartbeat, &QTimer::timeout, &p, [&] {
+            const auto now = heartbeatClock.elapsed();
+            if (previousPhase == AiPanel::SmartFillPhase::Processing)
+                maximumProcessingGap = std::max(maximumProcessingGap, now - previousBeat);
+            if (previousPhase == AiPanel::SmartFillPhase::Applying)
+                maximumApplyingGap = std::max(maximumApplyingGap, now - previousBeat);
+            processingHeartbeats += p.smartFillPhase_ == AiPanel::SmartFillPhase::Processing;
+            applyingHeartbeats += p.smartFillPhase_ == AiPanel::SmartFillPhase::Applying;
+            previousPhase = p.smartFillPhase_;
+            previousBeat = now;
+        });
+        heartbeat.start();
+        phaseTimer.start();
+        p.prepareSmartFill();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 60000);
+        const qint64 preparationMs = phaseTimer.elapsed();
+        QVERIFY2(!p.pendingSmartFill_.empty() && !p.smartFillStale(), qPrintable(p.status_->text()));
+        QCOMPARE(aiSmartFillRemaining(p.pendingSmartFill_), 1);
+        const auto targetMasks = p.smartFillPreview_->masks;
+        QFile cachedImage(imagePath);
+        QVERIFY(cachedImage.open(QIODevice::ReadOnly));
+        const auto raw = cachedImage.readAll();
+        QVERIFY(!QImage::fromData(raw).isNull());
+        auto patches = p.pendingSmartFill_.value("patches").toArray();
+        auto patch = patches.first().toObject();
+        patch["generated"] = QString::fromLatin1(raw.toBase64());
+        patch["done"] = false;
+        patches[0] = patch;
+        p.pendingSmartFill_["patches"] = patches;
+        phaseTimer.restart();
+        p.smartFillReprocess();
+        QVERIFY(p.busy_);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 120000);
+        const qint64 processingMs = phaseTimer.elapsed();
+        QTest::qWait(20);
+        QVERIFY2(aiSmartFillRemaining(p.pendingSmartFill_) == 0, qPrintable(p.status_->text()));
+        QVERIFY(processingHeartbeats > 0);
+        QCOMPARE(p.atlases_.first().color, before.first().color);
+        QCOMPARE(p.candidate_, originalCandidate);
+        QCOMPARE(p.candidateSettings_, originalCandidateSettings);
+        QCOMPARE(p.capture_.get(), originalCapture.get());
+        phaseTimer.restart();
+        p.smartFillApply();
+        QVERIFY(p.busy_);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 120000);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.view_->texturesDirty_, 30000);
+        const qint64 applyMs = phaseTimer.elapsed();
+        QTest::qWait(20);
+        heartbeat.stop();
+        QVERIFY2(p.pendingSmartFill_.empty(), qPrintable(p.status_->text()));
+        QVERIFY(applyingHeartbeats > 0);
+        QCOMPARE(providerEvents.size(), 0);
+        QCOMPARE(p.undo_.size(), originalUndoCount + 1);
+        QCOMPARE(p.candidate_, originalCandidate);
+        QCOMPARE(p.candidateSettings_, originalCandidateSettings);
+        QCOMPARE(p.capture_.get(), originalCapture.get());
+        QSet<QString> originalIds;
+        for (const auto &layer : originalLayers)
+            originalIds.insert(layer.value("layerId").toString());
+        QList<QJsonObject> preservedLayers;
+        for (const auto &layer : p.projections_)
+            if (originalIds.contains(layer.value("layerId").toString()))
+                preservedLayers.append(layer);
+        QCOMPARE(preservedLayers, originalLayers);
+        QCOMPARE(p.projections_.size(), originalLayers.size() + 1);
+        qint64 knownChanges = 0, outsideMaskChanges = 0, targetedTexels = 0, repairedTexels = 0;
+        for (auto it = before.cbegin(); it != before.cend(); ++it) {
+            const auto &after = p.atlases_[it.key()];
+            const QImage mask = targetMasks.value(it.key());
+            for (int y = 0; y < it->color.height(); ++y)
+                for (int x = 0; x < it->color.width(); ++x) {
+                    if (it->coverage.constScanLine(y)[x])
+                        knownChanges += it->color.pixel(x, y) != after.color.pixel(x, y);
+                    if (!mask.isNull() && qGray(mask.pixel(x, y))) {
+                        ++targetedTexels;
+                        repairedTexels += after.coverage.constScanLine(y)[x] != 0;
+                    } else
+                        outsideMaskChanges +=
+                            it->color.pixel(x, y) != after.color.pixel(x, y) ||
+                            it->coverage.constScanLine(y)[x] != after.coverage.constScanLine(y)[x];
+                }
+        }
+        QCOMPARE(knownChanges, 0);
+        QCOMPARE(outsideMaskChanges, 0);
+        QVERIFY(targetedTexels > 0);
+        QCOMPARE(repairedTexels, targetedTexels);
+        const QString output = qEnvironmentVariable("FORNAIO_SMART_FILL_OUTPUT");
+        if (!output.isEmpty()) {
+            const auto absoluteOutput = QFileInfo(output).absoluteFilePath();
+            QVERIFY(absoluteOutput.compare(QFileInfo(scenePath).absoluteFilePath(), Qt::CaseInsensitive));
+            QVERIFY(absoluteOutput.compare(QFileInfo(p.meshPath_).absoluteFilePath(), Qt::CaseInsensitive));
+            QVERIFY(absoluteOutput.compare(QFileInfo(imagePath).absoluteFilePath(), Qt::CaseInsensitive));
+            QVERIFY(QDir().mkpath(QFileInfo(output).absolutePath()));
+            if (p.smartFillDialog_)
+                p.smartFillDialog_->close();
+            QCoreApplication::processEvents();
+            choose(output);
+            p.saveProject();
+            QVERIFY2(QFileInfo::exists(output), qPrintable(p.status_->text()));
+            AiAtlases savedAtlases;
+            QList<QJsonObject> savedLayers;
+            const auto settings = aiLoadProject(output, savedAtlases, savedLayers);
+            QVERIFY(!settings.contains("pendingSmartFill"));
+            QCOMPARE(savedLayers, p.projections_);
+            if (!originalCandidate.isNull()) {
+                const auto saved = settings.value("pendingCandidate").toObject();
+                QCOMPARE(saved.value("camera"), originalCandidateSettings.value("camera"));
+                const auto savedImage =
+                    QImage::fromData(QByteArray::fromBase64(saved.value("candidate").toString().toLatin1()));
+                QCOMPARE(savedImage.convertToFormat(QImage::Format_RGB32),
+                         originalCandidate.convertToFormat(QImage::Format_RGB32));
+            }
+        }
+        QCOMPARE(fingerprint(scenePath), originalProjectHash);
+        QCOMPARE(fingerprint(imagePath), originalImageHash);
+        QCOMPARE(fingerprint(p.meshPath_), originalMeshHash);
+        const QJsonObject metrics{{"preparationMs", preparationMs},
+                                  {"processingMs", processingMs},
+                                  {"applyMs", applyMs},
+                                  {"processingHeartbeats", processingHeartbeats},
+                                  {"applyingHeartbeats", applyingHeartbeats},
+                                  {"maximumProcessingHeartbeatGapMs", maximumProcessingGap},
+                                  {"maximumApplyHeartbeatGapMs", maximumApplyingGap},
+                                  {"targetedTexels", targetedTexels},
+                                  {"repairedTexels", repairedTexels},
+                                  {"knownPaintChanges", knownChanges},
+                                  {"outsideRepairMaskChanges", outsideMaskChanges},
+                                  {"providerEvents", providerEvents.size()},
+                                  {"originalLayers", originalLayers.size()},
+                                  {"finalLayers", p.projections_.size()},
+                                  {"projectSha256", QString::fromLatin1(originalProjectHash.toHex())},
+                                  {"output", output}};
+        qInfo().noquote() << "SMART_FILL_CACHED_UI_PROBE"
+                          << QJsonDocument(metrics).toJson(QJsonDocument::Compact);
+    }
+    void smartFillLegacyPreviewRequiresExplicitOneRequestReplan() {
+        qputenv("FORNAIO_GPT_BACKEND", "fake");
+        const auto restore = qScopeGuard([] { qunsetenv("FORNAIO_GPT_BACKEND"); });
+        AiPanel p;
+        QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.resolution_->setCurrentIndex(p.resolution_->findData(1024));
+        const QString material = p.atlases_.firstKey();
+        paintAtlas(p.atlases_[material], qRgb(190, 80, 50));
+        p.atlases_[material].coverage.scanLine(500)[500] = 0;
+        p.layerBase_ = p.atlases_;
+        p.startSmartFill();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 20000);
+        // Simulate a loaded old multi-crop plan. Its source/masks and any
+        // completed repair data must survive a rejected Generate action.
+        p.pendingSmartFill_["version"] = 1;
+        p.pendingSmartFill_["patches"] =
+            QJsonArray{QJsonObject{{"done", true}}, QJsonObject{{"done", false}}};
+        QImage repaired(1024, 1024, QImage::Format_RGBA8888);
+        repaired.fill(Qt::transparent);
+        repaired.setPixelColor(500, 500, QColor(180, 70, 40));
+        QByteArray bytes;
+        QBuffer buffer(&bytes);
+        QVERIFY(buffer.open(QIODevice::WriteOnly));
+        QVERIFY(repaired.save(&buffer, "PNG"));
+        p.pendingSmartFill_["repairs"] = QJsonObject{{material, QString::fromLatin1(bytes.toBase64())}};
+        const QJsonValue masks = p.pendingSmartFill_["masks"];
+        const QJsonValue patches = p.pendingSmartFill_["patches"];
+        const QJsonValue repairs = p.pendingSmartFill_["repairs"];
+        QSignalSpy providerEvents(&p.cloud_, &AiCloudImage::event);
+        p.refreshSmartFill();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QVERIFY(!p.smartFillGenerate_->isEnabled());
+        QVERIFY(p.smartFillApply_->isEnabled());
+        p.smartFillGenerate();
+        QVERIFY(!p.busy_);
+        QCOMPARE(providerEvents.size(), 0);
+        QCOMPARE(p.pendingSmartFill_["masks"], masks);
+        QCOMPARE(p.pendingSmartFill_["patches"], patches);
+        QCOMPARE(p.pendingSmartFill_["repairs"], repairs);
+        QVERIFY(p.status_->text().contains("one-request preview"));
+        QCOMPARE(p.smartFillReplan_->text(), QString("New one-request preview"));
+        p.smartFillApply();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QVERIFY(p.pendingSmartFill_.empty());
+        QCOMPARE(p.atlases_[material].color.pixel(500, 500), qRgb(180, 70, 40));
+    }
+    void smartFillLegacyMissingCacheAppliesWithoutRebuild() {
+        qputenv("FORNAIO_GPT_BACKEND", "fake");
+        const auto restore = qScopeGuard([] { qunsetenv("FORNAIO_GPT_BACKEND"); });
+        AiPanel p;
+        QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.resolution_->setCurrentIndex(p.resolution_->findData(1024));
+        p.parity_ = false;
+        const auto base = p.atlases_;
+        const auto c = capture(*p.scene_, base, 128);
+        QImage mask = c.silhouette.convertToFormat(QImage::Format_RGB32);
+        QPainter painter(&mask);
+        painter.fillRect(QRect(60, 60, 8, 8), Qt::black);
+        painter.end();
+        const auto image = solid(128, qRgb(190, 80, 50));
+        AiProjectionOptions options;
+        options.overlay = true;
+        options.feather = 0;
+        options.colorMatch = false;
+        options.recordLayer = true;
+        const auto projected =
+            aiProject(*p.scene_, 0, base, c, image, mask, p.selectedMaterials(), false, 8, nullptr, options);
+        auto encode = [](const QImage &im) {
+            QByteArray bytes;
+            QBuffer buffer(&bytes);
+            buffer.open(QIODevice::WriteOnly);
+            im.save(&buffer, "PNG");
+            return QString::fromLatin1(bytes.toBase64());
+        };
+        p.projections_ = {
+            QJsonObject{{"layerId", "unfrozen-camera"},
+                        {"visible", true},
+                        {"camera", aiCameraJson(c.camera)},
+                        {"candidate", encode(image)},
+                        {"mask", encode(mask)},
+                        {"materials", QJsonArray::fromStringList(p.selectedMaterials().values())},
+                        {"blending", QJsonObject{{"mode", "overlay"},
+                                                 {"strength", 1},
+                                                 {"feather", 0},
+                                                 {"anglePower", 2},
+                                                 {"minCosine", .15},
+                                                 {"colorMatch", false}}}}};
+        p.atlases_ = projected.atlases;
+        p.refreshLayers();
+        p.refresh();
+        const auto before = p.atlases_;
+        QVERIFY(covered(before.first().coverage) > 0);
+        QVERIFY(!p.projections_[0].contains("uvLayer"));
+        p.startSmartFill();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 20000);
+        QVERIFY2(!p.pendingSmartFill_.empty(), qPrintable(p.status_->text()));
+        QVERIFY(aiSmartFillRemaining(p.pendingSmartFill_) > 0);
+        QVERIFY(!p.projections_[0].contains("uvLayer"));
+        p.smartFillGenerate();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QCOMPARE(aiSmartFillRemaining(p.pendingSmartFill_), 0);
+        p.smartFillApply();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QVERIFY2(p.pendingSmartFill_.empty(), qPrintable(p.status_->text()));
+        QVERIFY(!p.parity_);
+        QCOMPARE(p.projections_.size(), 2);
+        QVERIFY(aiIsRepairLayer(p.projections_[0]));
+        QCOMPARE(p.projections_[1]["layerId"].toString(), QString("unfrozen-camera"));
+        QCOMPARE(p.projections_[1]["uvLayer"].toObject()["version"].toInt(), 1);
+        QVERIFY(covered(p.atlases_.first().coverage) > covered(before.first().coverage));
+        for (int y = 0; y < 1024; ++y)
+            for (int x = 0; x < 1024; ++x)
+                if (before.first().coverage.constScanLine(y)[x])
+                    QCOMPARE(p.atlases_.first().color.pixel(x, y), before.first().color.pixel(x, y));
+        p.undoButton_->click();
+        QCOMPARE(p.projections_.size(), 1);
+        QVERIFY(!p.projections_[0].contains("uvLayer"));
+        QCOMPARE(p.atlases_.first().color, before.first().color);
+        QCOMPARE(p.atlases_.first().coverage, before.first().coverage);
+    }
+    void smartFillKeepsPendingRegenerationTargetAcrossInsertionAndReopen() {
+        qputenv("FORNAIO_GPT_BACKEND", "fake");
+        const auto restore = qScopeGuard([] { qunsetenv("FORNAIO_GPT_BACKEND"); });
+        QTemporaryDir dir;
+        AiPanel p;
+        QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.resolution_->setCurrentIndex(p.resolution_->findData(1024));
+        const auto material = p.atlases_.firstKey();
+        QImage rgba(1024, 1024, QImage::Format_RGBA8888);
+        rgba.fill(QColor(190, 80, 50));
+        for (int y = 500; y < 508; ++y)
+            for (int x = 500; x < 508; ++x)
+                rgba.scanLine(y)[x * 4 + 3] = 0;
+        AiLayerContribution contribution;
+        contribution.materials[material] = rgba;
+        p.projections_ = {QJsonObject{{"kind", "projection"},
+                                      {"layerId", "camera-to-replace"},
+                                      {"visible", true},
+                                      {"materials", QJsonArray{material}},
+                                      {"blending", QJsonObject{{"mode", "blend"}, {"strength", 1}}},
+                                      {"uvLayer", aiEncodeProjectionLayer(contribution, 1024)}}};
+        p.atlases_ = aiComposeLayerStack(p.layerBase_, p.projections_, true);
+        p.refreshLayers();
+        p.capture_ = std::make_shared<AiCapture>(capture(*p.scene_, p.atlases_, 128));
+        p.candidateSettings_ = {{"id", "replacement"}, {"camera", aiCameraJson(p.capture_->camera)}};
+        const auto output = dir.filePath("replacement.png");
+        QVERIFY(solid(128, qRgb(20, 40, 220)).save(output));
+        p.setBusy(true);
+        p.workerEvent({{"event", "result"}, {"id", "replacement"}, {"output", output}, {"alignment", 1.0}});
+        p.regenerateIndex_ = 0; // Compatibility with candidates that predate the stable target metadata.
+        const auto pendingCamera = p.candidate_;
+        p.startSmartFill();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 20000);
+        QVERIFY2(!p.pendingSmartFill_.empty(), qPrintable(p.status_->text()));
+        p.smartFillGenerate();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        p.smartFillApply();
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QVERIFY2(p.pendingSmartFill_.empty(), qPrintable(p.status_->text()));
+        QCOMPARE(p.projections_.size(), 2);
+        QCOMPARE(p.regenerateIndex_, 1);
+        QCOMPARE(p.regenerateLayerId_, QString("camera-to-replace"));
+        QCOMPARE(p.candidate_, pendingCamera);
+        QCOMPARE(p.candidateSettings_["regenerateLayerId"].toString(), QString("camera-to-replace"));
+        const QJsonObject repair = p.projections_[0];
+        p.undoButton_->click();
+        QCOMPARE(p.regenerateIndex_, 0);
+        QCOMPARE(p.candidate_, pendingCamera);
+        p.redoButton_->click();
+        QCOMPARE(p.regenerateIndex_, 1);
+        if (p.smartFillDialog_)
+            p.smartFillDialog_->close();
+        QCoreApplication::processEvents();
+        const auto path = dir.filePath("pending-regeneration.fornaioai");
+        auto choose = [path] {
+            auto dialog = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            dialog->selectFile(path);
+            QMetaObject::invokeMethod(dialog, "accept", Qt::QueuedConnection);
+        };
+        QTimer::singleShot(0, &p, choose);
+        p.saveProject();
+        QVERIFY(QFileInfo::exists(path));
+        QTimer::singleShot(0, &p, choose);
+        p.openProject();
+        QCOMPARE(p.regenerateIndex_, 1);
+        QCOMPARE(p.regenerateLayerId_, QString("camera-to-replace"));
+        QCOMPARE(p.candidate_, pendingCamera);
+        p.projectCandidate(false);
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 10000);
+        QCOMPARE(p.projections_.size(), 2);
+        QCOMPARE(p.projections_[0], repair);
+        QCOMPARE(p.projections_[1]["layerId"].toString(), QString("camera-to-replace"));
+        QCOMPARE(p.regenerateIndex_, -1);
+        QVERIFY(p.regenerateLayerId_.isEmpty());
+        QVERIFY(qBlue(p.atlases_[material].color.pixel(512, 512)) > 200);
+    }
     void parityLayerDeleteReorderIsolationAndHistory() {
         QTemporaryDir storage;
         AiPanel p;

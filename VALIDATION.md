@@ -730,3 +730,168 @@ were not rerun: the maintainer Python used here has no PyTorch installation, and
 the inference kernels were unchanged. Graphify is refreshed from the new code;
 its C++ extractor warns about Qt test macros and may only partially index those
 test files despite successful native compilation.
+
+### Initial Smart fill prototype (October 29, 2026, superseded request strategy)
+
+Smart fill uses native UV occupancy and accepted coverage, independently of exterior
+padding. A dedicated test suite exercises malicious replacement images that redraw
+the entire request: acceptance copies only the original missing texels. It covers
+one-pixel and UV-boundary holes, material/chart isolation, crop boundaries, partial
+progress and retry, mask exclusion, 1024/2048/4096 atlases, stable source fingerprints,
+cancellation, repair provenance, ordinary projections superseding repairs, hidden
+projections exposing only the repair's frozen mask, legacy composition, rebuild, and
+version-3 project round trips. A cloud regression checks that cancelled asynchronous
+callbacks cannot finish a later request.
+
+UI regressions cover preview/generation/Apply with the fake provider, byte-identical
+accepted paint, an unchanged pending camera candidate, stale candidates, save/reopen,
+visibility/deletion and undo/redo. Additional cases exercise legacy camera records
+without UV caches, stable pending regeneration identities after repair insertion,
+and cancellation after one crop followed by retry or partial Apply. Accepted paint
+is checked before committing a repair; failures leave the accepted stack unchanged.
+
+The supplied `head_test5.fornaioai` was inspected at 2048 resolution with its exact
+four visible projection layers. The offline probe planned 18 chart-local requests
+for 199,468 missing geometric texels. Deliberately uniform synthetic output filled
+all 199,468 targets, with **zero changed previously painted texels** and **zero
+changed pixels outside geometric UV occupancy**. UV images and five 3D views were
+saved for inspection of the nostrils, ears, chin and inner eyelids. The synthetic
+colors establish target coverage and preservation, not generated appearance quality.
+The separate diagnostic copy retains all original projection records and the
+ordinary pending camera candidate unchanged, and adds one UV repair layer.
+
+The original project remains 37,893,767 bytes with SHA-256
+`b31941c453f7fe6e290e7dd007ae1bbfcc2c1eda06b2bf84f8ec8d58bfa52bc9`.
+The source mesh remains 1,832,064 bytes with SHA-256
+`831801990a8cec6df77ec51d5329c61d7a62b7b6182506e2afe2abc2ddd8cf34`.
+Private artifacts are in ignored `.ai-qa/smart-fill/` directories and are excluded
+from the portable and source packages.
+
+No live Smart fill inference or model download has run. Automatic approval review
+blocked the proposed single GPT Image 2 quality sample because it uploads
+project-derived texture data and consumes a generation request. A fresh native
+crop, repair map, alpha mask and accepted appearance render are prepared in
+`.ai-qa/smart-fill/head_test5-review/`; generated appearance remains unvalidated
+until the user explicitly approves that request. Normal camera generation behavior
+is covered by existing fake-provider tests; its paid smoke test remains opt-in.
+
+Final checks: 10 Smart fill test phases, 68 AI test phases with one paid smoke test
+skipped, 14 projection phases, 9 general UI phases, and 15 Python worker tests pass.
+After the final cloud-callback ownership fix, the focused Smart fill cancellation,
+retry and normal cloud-generation tests were rerun successfully. Core/OptiX,
+Texture Transfer and UV2 self-tests pass with native GPU access. The portable
+application and source packages were rebuilt locally. Layer visibility cache hits
+measured 9 ms to show (including viewport paint) and 3 ms to hide in the final AI
+suite; large layer assets are no longer serialized for each cache lookup.
+
+`graphify update .` refreshed 2,486 nodes and 5,853 edges in 122 communities.
+Dependency inspection confirms `AiPanel::smartFillNext` calls `aiSmartFillRequest`,
+which uses the dedicated `aiGptUvRepairPrompt`. Graphify still reports partial
+extraction around Qt test macros and no symbols for declaration-only
+`ai_smart_fill.h`; native compilation and tests cover those files.
+
+### Smart fill: one generation for all gaps (October 29, 2026, unreleased)
+
+The cropped generation sequence above has been replaced at the user's request.
+New Smart fill plans contain at most one request, covering all selected gaps in
+one combined UV image. Single-material inputs retain the native atlas size;
+multiple materials use a deterministic grid capped at 4096 square. The returned
+1024 image supplies colors only: native source images, write masks and eligibility
+remain unchanged. Local boundary matching remains material- and chart-specific.
+
+The UI stops after one provider result and does not automatically launch another
+request, even for a malformed saved plan. Earlier cropped candidates remain
+previewable and applicable, but their Generate action is disabled. **New
+one-request preview** explicitly replaces the old candidate; it never silently
+discards completed repairs. Cancellation and failure preserve accepted paint.
+
+The revised `head_test5` offline replay reports **1 request**, **1 completed result**,
+199,468 repaired texels, zero remaining geometric gaps, **zero changed previously
+painted texels**, and **zero changed exterior pixels**. It uses deliberately uniform
+synthetic output, so these results verify mask coverage and preservation rather
+than AI appearance. Results are in ignored
+`.ai-qa/smart-fill/head_test5-one-generation/`. The original project and mesh
+fingerprints listed above remain unchanged.
+
+The revised Smart fill suite passes 13 phases. It covers one request across distant
+regions and multiple materials, native atlas sizes through 4096, conservative
+one-pixel guidance when material grids downsample, color isolation between material
+cells, and older cropped partial-candidate save/preview/Apply compatibility. The
+AI suite passes 69 phases with one paid smoke test skipped, including exactly one
+provider result, cancellation followed by explicit retry, no automatic follow-up
+generation, exact paint preservation, and legacy preview replanning. General UI
+regressions pass 9 phases. Normal projection and AI-provider behavior are unchanged.
+
+### Smart fill color matching and responsiveness (October 29, 2026)
+
+The earlier matcher trusted the AI's redrawn protected pixels as boundary color
+references and faded its correction to zero after 32 texels. The replacement uses
+accepted-only color continuation on the editable side of a hole and propagates a
+harmonic correction throughout each anchored component, retaining generated
+interior texture gradients. Native masks, material/chart isolation and exact
+accepted-paint preservation remain in force. Fully unanchored charts still depend
+on the candidate; color matching cannot undo invented or shifted anatomy.
+
+The synthetic 95% progress value was elapsed time divided by 70 seconds, capped at
+95%, rather than provider telemetry. Cloud requests now show an indeterminate
+stage and elapsed time. Codex startup is asynchronous; a stable, fully decoded PNG
+is frozen atomically before the CLI's final reply finishes. A local child-process
+stub verifies rejection of partial PNGs, frozen-byte safety, early return before
+the final-reply tail, and cancellation/retry. Smart fill retains one provider
+call. Request preparation, matching, fingerprinting, preview generation
+and Apply composition now run outside the GUI thread. Returned raw pixels are
+checkpointed before processing, allowing **Retry processing** or **Reprocess
+candidate** with no additional inference. Cancelled or failed commits retain the
+accepted stack.
+
+The user's latest `head_test5` has eight visible camera layers and is 61,946,915
+bytes, SHA-256
+`16f06b47f2f0d3e4494bd12e9ff7667b65fd1c5097bd0c722d9a66b6aa6d3b87`.
+It was cloned before testing; neither that original nor `head.obj` was written.
+The original four-view source was also retained from the previous diagnostic copy.
+The cached UV-repair output from the application's 18:03:58 Codex session was
+recovered read-only. The UV image is 1254 square, SHA-256
+`9b73bd6715ebf3b05655c87d38b1fbf2bc8c82e226ddf978b8ad393335c14254`.
+No new paid request was made.
+
+Cached-image replays repair all 199,468 targets in the four-view source and all
+100,075 targets in the current eight-view source. Both have zero changes to
+previously painted texels and zero changes outside geometric occupancy. Mean
+absolute RGB boundary difference against adjacent accepted texels falls from
+26.10 to 1.81 levels for four views, and from 31.66 to 2.30 for eight views
+(raw candidate versus matched output, on the 0-255 scale). Native acceptance takes
+1.59 and 1.20 seconds respectively; the full diagnostic also renders five views
+and writes private evidence, taking about 14.6 seconds. UV and 3D front/profile/
+underside results were inspected. These measures assess color joins, not recovery
+of missing anatomical detail.
+
+An opt-in UI probe loads the cloned eight-view project through the normal file
+dialog, forces providers off, reprocesses the cached PNG and Applies/saves through
+the actual panel. Preparation takes 2.66 seconds, processing 1.47 seconds and Apply
+1.17 seconds including viewport upload. A 10 ms GUI heartbeat runs throughout:
+86 processing beats (maximum gap 32 ms) and 58 Apply beats (maximum gap 249 ms).
+All 100,075 targets are repaired, accepted-paint changes and changes outside the
+write mask are both zero, and provider event count is zero. All eight original
+layer records/cameras and the ordinary pending candidate/capture are retained.
+Apply is one undoable operation. The saved review copy is
+`.ai-qa/smart-fill/quality-investigation/head_test5-repaired.fornaioai`.
+
+Checks pass: 18 native Smart fill phases, 70 AI phases (paid smoke test skipped),
+5 cloud lifecycle phases, 14 projection phases, 9 general UI phases, 15 Python
+worker tests, and core/OptiX/transfer/UV2 self-tests. The cached-scene UI probe passes
+separately. Its environment variables are `FORNAIO_SMART_FILL_SCENE`,
+`FORNAIO_SMART_FILL_IMAGE`, and optional `FORNAIO_SMART_FILL_OUTPUT`; all providers
+are forcibly disabled. The application was built in `build/smart-fill-quality/`
+to avoid replacing a running executable. Private images, project copies and
+reports remain excluded from distribution.
+
+### Release 1.4.0 (October 30, 2026)
+
+The versioned release build passes 70 AI test phases (the paid generation and
+private cached-scene probes are opt-in and skipped in this run), 18 Smart fill
+phases, 5 cloud lifecycle phases, 14 projection phases, 9 general UI phases,
+15 Python worker tests, and the core/OptiX/transfer/UV2 self-tests. The cached-scene
+probe and exact-paint results above remain applicable; the release preparation
+changes the application version and release documentation. Graphify is refreshed
+before committing the release. The portable and source archives exclude private
+project copies, test output, model weights, and the local workspace file.

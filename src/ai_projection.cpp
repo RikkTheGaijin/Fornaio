@@ -8,11 +8,15 @@
 #include <QSurfaceFormat>
 #include <QThread>
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <stdexcept>
+#include <tuple>
 
 namespace {
 void require(bool ok, const QString &message) {
@@ -119,6 +123,10 @@ const char *uvFragment = R"(#version 330 core
 out vec4 result;
 void main(){result=vec4(1);}
 )";
+const char *chartFragment = R"(#version 330 core
+layout(location=0) out uint result;
+void main(){result=uint(gl_PrimitiveID)+1u;}
+)";
 const char *paddingFragment = R"(#version 330 core
 uniform sampler2D projectionMap,islandMap;
 in vec2 screenUv;
@@ -144,7 +152,7 @@ struct Vertex {
 class ProjectionWorker final : public QObject, protected QOpenGLFunctions_3_3_Core {
     QOffscreenSurface *surface_;
     std::unique_ptr<QOpenGLContext> context_;
-    std::unique_ptr<QOpenGLShaderProgram> depth_, erosion_, projection_, islands_, padding_;
+    std::unique_ptr<QOpenGLShaderProgram> depth_, erosion_, projection_, islands_, charts_, padding_;
     unsigned vao_ = 0, vbo_ = 0;
 
     std::unique_ptr<QOpenGLShaderProgram> program(const char *vertex, const char *fragment) {
@@ -251,6 +259,7 @@ class ProjectionWorker final : public QObject, protected QOpenGLFunctions_3_3_Co
         erosion_ = program(screenVertex, erosionFragment);
         projection_ = program(projectionVertex, projectionFragment);
         islands_ = program(uvVertex, uvFragment);
+        charts_ = program(uvVertex, chartFragment);
         padding_ = program(screenVertex, paddingFragment);
         glGenVertexArrays(1, &vao_);
         glGenBuffers(1, &vbo_);
@@ -262,6 +271,7 @@ class ProjectionWorker final : public QObject, protected QOpenGLFunctions_3_3_Co
             erosion_.reset();
             projection_.reset();
             islands_.reset();
+            charts_.reset();
             padding_.reset();
             if (vao_)
                 glDeleteVertexArrays(1, &vao_);
@@ -271,6 +281,125 @@ class ProjectionWorker final : public QObject, protected QOpenGLFunctions_3_3_Co
             context_->doneCurrent();
         }
         context_.reset();
+    }
+    AiUvDomains domains(const Scene &scene, int uv, int resolution, const QSet<QString> &materials,
+                        std::atomic_bool *cancel) {
+        require(context_ && context_->makeCurrent(surface_), "Projection context was lost");
+        struct DoneCurrent {
+            QOpenGLContext *context;
+            ~DoneCurrent() { context->doneCurrent(); }
+        } done{context_.get()};
+        Resources resources{*this};
+        glDisable(GL_MULTISAMPLE);
+        glDisable(GL_FRAMEBUFFER_SRGB);
+        glDisable(GL_DITHER);
+        glDisable(GL_BLEND);
+        glDisable(GL_SCISSOR_TEST);
+        glDisable(GL_STENCIL_TEST);
+        glDisable(GL_POLYGON_OFFSET_FILL);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+
+        // Connectivity includes both the position and selected UV endpoints.
+        // Coincident islands belonging to another object/material stay separate.
+        std::vector<int> parent(scene.tris.size());
+        std::iota(parent.begin(), parent.end(), 0);
+        auto root = [&](int face) {
+            while (parent[face] != face) {
+                parent[face] = parent[parent[face]];
+                face = parent[face];
+            }
+            return face;
+        };
+        using Edge = std::tuple<QString, int, std::array<float, 10>>;
+        std::map<Edge, int> edges;
+        QMap<QString, std::vector<int>> faces;
+        require(scene.tris.size() <= size_t(std::numeric_limits<int>::max() / 3),
+                "UV mesh is too large");
+        for (int i = 0; i < int(scene.tris.size()); ++i) {
+            cancelled(cancel);
+            const auto &t = scene.tris[size_t(i)];
+            const QString material = aiMaterial(scene, t);
+            if (!materials.contains(material))
+                continue;
+            require(uv >= 0 && uv < int(t.uv.size()), "Missing selected UV set");
+            faces[material].push_back(i);
+            for (int k = 0; k < 3; ++k) {
+                const int l = (k + 1) % 3;
+                std::array<float, 5> a{t.p[k].x, t.p[k].y, t.p[k].z, t.uv[uv][k].x, t.uv[uv][k].y};
+                std::array<float, 5> b{t.p[l].x, t.p[l].y, t.p[l].z, t.uv[uv][l].x, t.uv[uv][l].y};
+                for (float value : a)
+                    require(std::isfinite(value), "Invalid UV mesh coordinate");
+                for (float value : b)
+                    require(std::isfinite(value), "Invalid UV mesh coordinate");
+                if (b < a)
+                    std::swap(a, b);
+                std::array<float, 10> endpoints;
+                std::copy(a.begin(), a.end(), endpoints.begin());
+                std::copy(b.begin(), b.end(), endpoints.begin() + 5);
+                const auto [edge, inserted] = edges.emplace(Edge{material, t.object, endpoints}, i);
+                if (!inserted)
+                    parent[size_t(root(i))] = root(edge->second);
+            }
+        }
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                              reinterpret_cast<const void *>(6 * sizeof(float)));
+        AiUvDomains result;
+        for (auto it = faces.cbegin(); it != faces.cend(); ++it) {
+            cancelled(cancel);
+            Resources materialResources{*this};
+            std::vector<Vertex> vertices;
+            vertices.reserve(it->size() * 3);
+            std::vector<int> faceCharts;
+            faceCharts.reserve(it->size());
+            for (int face : *it) {
+                const auto &triangle = scene.tris[size_t(face)];
+                faceCharts.push_back(root(face));
+                for (int k = 0; k < 3; ++k) {
+                    const auto t = triangle.uv[uv][k];
+                    vertices.push_back(Vertex{{0, 0, 0}, {0, 0, 0}, {t.x, t.y}});
+                }
+            }
+            glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STREAM_DRAW);
+            const auto target = texture(materialResources, resolution, resolution, GL_R32UI, GL_RED_INTEGER,
+                                        GL_UNSIGNED_INT, nullptr, false);
+            framebuffer(materialResources, target, resolution, resolution);
+            viewportWidth_ = resolution;
+            const unsigned empty[4] = {};
+            glClearBufferuiv(GL_COLOR, 0, empty);
+            charts_->bind();
+            drawStrips(int(vertices.size()), resolution, cancel);
+            charts_->release();
+            std::vector<unsigned> raster(size_t(resolution) * resolution);
+            glReadPixels(0, 0, resolution, resolution, GL_RED_INTEGER, GL_UNSIGNED_INT, raster.data());
+            require(glGetError() == GL_NO_ERROR, "OpenGL UV occupancy failed");
+            AiUvDomain domain;
+            domain.occupancy = QImage(resolution, resolution, QImage::Format_Grayscale8);
+            require(!domain.occupancy.isNull(), "Cannot allocate UV occupancy image");
+            domain.occupancy.fill(0);
+            domain.charts.fill(-1, resolution * resolution);
+            for (int y = 0; y < resolution; ++y) {
+                cancelled(cancel);
+                auto *occupancy = domain.occupancy.scanLine(y);
+                for (int x = 0; x < resolution; ++x) {
+                    const auto primitive = raster[size_t(resolution - 1 - y) * resolution + x];
+                    if (!primitive)
+                        continue;
+                    require(primitive <= faceCharts.size(), "Invalid UV chart raster");
+                    occupancy[x] = 255;
+                    domain.charts[y * resolution + x] = faceCharts[primitive - 1];
+                }
+            }
+            result.insert(it.key(), std::move(domain));
+        }
+        return result;
     }
     AiLayerContribution render(const Scene &scene, int uv, int resolution, const AiCamera &camera,
                                const QImage &source, const QImage &mask, const QImage &uvMask,
@@ -482,6 +611,19 @@ void aiShutdownProjectionRenderer() {
     renderer->thread.quit();
     renderer->thread.wait();
     renderer.reset();
+}
+
+AiUvDomains aiUvDomains(const Scene &scene, int uv, int resolution, const QSet<QString> &materials,
+                        std::atomic_bool *cancel) {
+    cancelled(cancel);
+    require(resolution > 0 && resolution <= 4096, "Invalid UV occupancy resolution");
+    std::lock_guard<std::mutex> guard(rendererMutex);
+    require(renderer != nullptr, "Projection renderer is not initialized");
+    AiUvDomains result;
+    onRenderer(renderer->worker, [&] {
+        result = renderer->worker->domains(scene, uv, resolution, materials, cancel);
+    });
+    return result;
 }
 
 AiLayerContribution aiRenderProjection(const Scene &scene, int uv, int resolution, const AiCamera &camera,
