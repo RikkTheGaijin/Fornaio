@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(Fornaio VERSION 1.4.0 LANGUAGES C CXX)
+project(Fornaio VERSION 1.4.1 LANGUAGES C CXX)
 add_compile_definitions(FORNAIO_VERSION="${PROJECT_VERSION}")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_AUTOMOC ON)

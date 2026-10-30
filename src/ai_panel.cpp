@@ -1021,6 +1021,12 @@ AiPanel::AiPanel(QWidget *parent) : QWidget(parent), installer_(this), engine_(t
     bar->addWidget(cancelButton_);
     connect(cancelButton_, &QPushButton::clicked, this, &AiPanel::cancelJob);
     // Keep acceptance reachable while the generation panel is scrolled or the full-size image is open.
+    autoApply_ = new QCheckBox("Auto apply");
+    autoApply_->setObjectName("aiAutoApply");
+    autoApply_->setChecked(true);
+    autoApply_->setToolTip("Project each generated image as soon as it is ready. Undo is available. "
+                           "Disable to inspect and mask the candidate before projecting.");
+    bar->addWidget(autoApply_);
     bar->addWidget(project_);
     smartFill_ = new QPushButton("Smart fill...");
     smartFill_->setObjectName("aiSmartFill");
@@ -1805,6 +1811,8 @@ void AiPanel::prepareSmartFill(const QString &replaceLayer) {
                     }
                     pendingSmartFill_ = plan;
                     smartFillPreview_ = preview;
+                    if (smartFillTargets_)
+                        smartFillTargets_->setChecked(true);
                     smartFillActive_ = false;
                     smartFillPhase_ = SmartFillPhase::Idle;
                     progress_->setRange(0, 1000);
@@ -1959,8 +1967,10 @@ void AiPanel::showSmartFill() {
     smartFillMaterial_->setObjectName("aiSmartFillMaterial");
     materialBar->addWidget(smartFillMaterial_, 1);
     auto showTargets = new QCheckBox("Show targeted gaps");
+    showTargets->setObjectName("aiSmartFillTargets");
     showTargets->setChecked(true);
     materialBar->addWidget(showTargets);
+    smartFillTargets_ = showTargets;
     layout->addLayout(materialBar);
     auto tabs = new QTabWidget;
     layout->addWidget(tabs, 1);
@@ -2067,6 +2077,7 @@ void AiPanel::showSmartFill() {
     };
     connect(dialog, &QObject::destroyed, this, [this] {
         smartFillCanvas_ = nullptr;
+        smartFillTargets_ = nullptr;
         smartFillView_ = nullptr;
         smartFillMaterial_ = nullptr;
         smartFillInfo_ = nullptr;
@@ -2344,6 +2355,9 @@ void AiPanel::processSmartFillResult(const QString &path) {
                     }
                     pendingSmartFill_ = completed;
                     smartFillPreview_ = preview;
+                    // Show the filled result unobstructed; the green targets matter before generating.
+                    if (smartFillTargets_)
+                        smartFillTargets_->setChecked(false);
                     smartFillStop(
                         "Smart fill candidate ready. Inspect UV and 3D previews, then Apply Smart fill.");
                 },
@@ -2974,7 +2988,10 @@ void AiPanel::workerEvent(const QJsonObject &event) {
         }
         if (automatic_)
             projectCandidate(true);
-        else {
+        else if (autoApply_->isChecked()) {
+            setBusy(false);
+            projectCandidate(false);
+        } else {
             status_->setText(QString("Candidate ready in %1 s. Inspect the geometry outline and paint "
                                      "the mask before projecting. Left drag excludes; right restores.")
                                  .arg(event["seconds"].toDouble(), 0, 'f', 1));
@@ -3340,6 +3357,7 @@ void AiPanel::saveProject() {
                              {"randomSeed", randomSeed_->isChecked()},
                              {"generationMode", generationMode_->currentIndex()},
                              {"showUncovered", showUncovered_->isChecked()},
+                             {"autoApply", autoApply_->isChecked()},
                              {"profile", profile_->currentData().toString()},
                              {"materials", QJsonArray::fromStringList(selectedMaterials().values())},
                              {"blendMode", blendMode_->currentData().toString()},
@@ -3411,6 +3429,7 @@ void AiPanel::openProject() {
         randomSeed_->setChecked(settings["randomSeed"].toBool(true));
         generationMode_->setCurrentIndex(settings["generationMode"].toInt() == 1 ? 1 : 0);
         showUncovered_->setChecked(settings["showUncovered"].toBool(true));
+        autoApply_->setChecked(settings["autoApply"].toBool(true));
         profile_->setCurrentIndex(profile_->findData(settings["profile"].toString()));
         QSet<QString> selected;
         for (const auto &v : settings["materials"].toArray())

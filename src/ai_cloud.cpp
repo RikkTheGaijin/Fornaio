@@ -179,10 +179,10 @@ void AiCloudImage::reportProgress() {
     if (!busy())
         return;
     const double seconds = elapsed_.elapsed() / 1000.;
+    // The provider reports no progress; estimate from a typical ~70 s generation and hold below done.
     emit event({{"event", "progress"},
                 {"id", request_["id"]},
-                {"fraction", -1},
-                {"indeterminate", true},
+                {"fraction", std::min(.95, seconds / 70)},
                 {"phase", phase_},
                 {"phaseSeconds", std::max<qint64>(0, elapsed_.elapsed() - phaseStartedMs_) / 1000.},
                 {"elapsedSeconds", seconds},

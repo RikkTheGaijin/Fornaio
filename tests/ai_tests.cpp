@@ -870,6 +870,7 @@ class AiTests : public QObject {
         const auto original = p.atlases_;
         p.startSmartFill();
         QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 30000);
+        QVERIFY(p.smartFillTargets_ && p.smartFillTargets_->isChecked());
         int providerResults = 0, cancelledHeartbeats = 0;
         const auto cancelProcessing =
             connect(&p.cloud_, &AiCloudImage::event, &p,
@@ -918,6 +919,7 @@ class AiTests : public QObject {
         QCOMPARE(repeatedProviderEvents.size(), 0);
         QCOMPARE(aiSmartFillRemaining(p.pendingSmartFill_), 0);
         QCOMPARE(p.pendingSmartFill_.value("matchingVersion").toInt(), 2);
+        QVERIFY(!p.smartFillTargets_->isChecked()); // The finished fill is shown without green targets.
         p.smartFillApply();
         QVERIFY(p.busy_);
         QTimer::singleShot(0, &p, [&p] { p.cancelJob(); });
@@ -1255,11 +1257,26 @@ class AiTests : public QObject {
         QCOMPARE(p.atlases_.first().color, before.first().color);
         QCOMPARE(p.atlases_.first().coverage, before.first().coverage);
     }
+    void autoApplyProjectsFinishedGeneration() {
+        QTemporaryDir dir;
+        AiPanel p;
+        QVERIFY(p.autoApply_->isChecked());
+        QVERIFY(p.loadMesh("samples/single_card.obj"));
+        p.capture_ = std::make_shared<AiCapture>(capture(*p.scene_, p.atlases_, 128));
+        p.candidateSettings_ = {{"id", "auto"}, {"camera", aiCameraJson(p.capture_->camera)}};
+        const auto output = dir.filePath("auto.png");
+        QVERIFY(solid(128, qRgb(20, 40, 220)).save(output));
+        p.setBusy(true);
+        p.workerEvent({{"event", "result"}, {"id", "auto"}, {"output", output}, {"alignment", 1.0}});
+        QTRY_VERIFY_WITH_TIMEOUT(!p.busy_, 20000);
+        QCOMPARE(p.projections_.size(), 1);
+    }
     void smartFillKeepsPendingRegenerationTargetAcrossInsertionAndReopen() {
         qputenv("FORNAIO_GPT_BACKEND", "fake");
         const auto restore = qScopeGuard([] { qunsetenv("FORNAIO_GPT_BACKEND"); });
         QTemporaryDir dir;
         AiPanel p;
+        p.autoApply_->setChecked(false); // The camera candidate stays pending across Smart fill.
         QVERIFY(p.loadMesh("samples/single_card.obj"));
         p.resolution_->setCurrentIndex(p.resolution_->findData(1024));
         const auto material = p.atlases_.firstKey();
@@ -1582,6 +1599,19 @@ class AiTests : public QObject {
         s.tris.back().material = 0;
         QVERIFY(!validateAiMesh(s, 0).empty());
         QVERIFY(!validateAiMesh(plane(), 1).empty());
+        // Quantized generated meshes: zero-area UV faces and sliver overlaps warn without blocking.
+        Scene quantized = plane();
+        Triangle collapsed = quantized.tris[0];
+        collapsed.uv[0] = {V2{.5f, .5f}, V2{.5f, .5f}, V2{.6f, .5f}};
+        Triangle sliver = quantized.tris[0];
+        sliver.p[2] = sliver.p[1] + V3{0, .001f, 0};
+        sliver.uv[0] = {V2{.99f, .001f}, V2{1, 0}, V2{1, .002f}};
+        quantized.tris.push_back(collapsed);
+        quantized.tris.push_back(sliver);
+        QStringList warnings;
+        const QStringList quantizedErrors = validateAiMesh(quantized, 0, &warnings);
+        QVERIFY2(quantizedErrors.empty(), qPrintable(quantizedErrors.join('\n')));
+        QCOMPARE(warnings.size(), 2);
     }
     void cameraAndProjection() {
         Scene s = plane();
@@ -2829,6 +2859,7 @@ class AiTests : public QObject {
         QTemporaryDir storage;
         AiPanel p;
         p.model_->setCurrentIndex(p.model_->findData("fibo")); // the local worker protocol
+        p.autoApply_->setChecked(false); // Inspect each request; projection is not under test.
         p.installer_.setRoot(storage.path());
         p.continuity_->setValue(0);
         QCOMPARE(p.generationResolution_->currentData().toInt(), 1024);
@@ -3181,6 +3212,8 @@ class AiTests : public QObject {
         QTemporaryDir storage;
         AiPanel p;
         p.model_->setCurrentIndex(p.model_->findData("fibo"));
+        QVERIFY(p.autoApply_->isChecked());
+        p.autoApply_->setChecked(false); // Manual review: the candidate waits for Project.
         // New projects use independent projection layers; legacy generation remains tested below.
         QVERIFY(p.parity_);
         QCOMPARE(p.blendMode_->currentData().toString(), QString("blend"));
@@ -3366,6 +3399,7 @@ class AiTests : public QObject {
     void panelReprojectsRepeatedlyOverFullCoverage() {
         QTemporaryDir storage;
         AiPanel p;
+        p.autoApply_->setChecked(false); // Projects the same candidate manually, twice.
         p.blendMode_->setCurrentIndex(p.blendMode_->findData("overlay")); // repaint semantics
         QVERIFY(p.loadMesh("samples/single_card.obj"));
         p.resolution_->setCurrentIndex(p.resolution_->findData(1024));

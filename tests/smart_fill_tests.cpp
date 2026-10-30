@@ -201,8 +201,8 @@ class SmartFillTests : public QObject {
         QVERIFY(!events.isEmpty());
         const auto progress = events.first().first().value<QJsonObject>();
         QCOMPARE(progress["event"].toString(), QString("progress"));
-        QVERIFY(progress["indeterminate"].toBool());
-        QVERIFY(progress["fraction"].toDouble() < 0);
+        QVERIFY(!progress["indeterminate"].toBool());
+        QVERIFY(progress["fraction"].toDouble(-1) >= 0 && progress["fraction"].toDouble() <= .95);
         QVERIFY(progress.contains("elapsedSeconds"));
         QVERIFY(progress.contains("phaseSeconds"));
         QTRY_VERIFY_WITH_TIMEOUT(!cloud.busy(), 2000);

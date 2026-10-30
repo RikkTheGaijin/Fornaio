@@ -895,3 +895,24 @@ probe and exact-paint results above remain applicable; the release preparation
 changes the application version and release documentation. Graphify is refreshed
 before committing the release. The portable and source archives exclude private
 project copies, test output, model weights, and the local workspace file.
+
+### Release 1.4.1 (October 30, 2026)
+
+AI Texturing validation now separates blocking UV defects from quantization
+artifacts. A 48,238-triangle generated OBJ with UVs on a 1/4096 grid previously
+loaded with a black preview: it has 54 zero-area UV triangles and 14 overlapping
+triangle pairs whose total intersection is about 13 texels at 4096 (an
+independent exact clipping script reproduced both counts). It now loads with two
+warnings. `samples/stacked_cards.fbx` UV1, whose cards fully overlap, is still
+rejected, and a synthetic regression covers a collapsed UV face plus a sliver
+overlap.
+
+GPT Image 2 progress again reports an elapsed-time estimate capped at 95%, so the
+bar fills rather than looping. New tests cover Auto apply projecting a finished
+generation and the Smart fill target overlay turning off when a candidate is
+ready; tests of the manual review workflow disable Auto apply explicitly.
+
+The release build passes 71 AI test phases (2 opt-in probes skipped), 18 Smart
+fill phases, 5 cloud lifecycle phases, 14 projection phases, 9 general UI phases,
+15 Python worker tests, the integration script, and the core/OptiX/transfer/UV2
+self-tests.

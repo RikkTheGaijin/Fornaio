@@ -181,6 +181,13 @@ Mirrored UV islands are supported. Overlap warnings identify the first offending
 
 ## Release notes
 
+### 1.4.1
+
+- Accept generated meshes with quantized UVs in AI Texturing: zero-area UV triangles and sliver overlaps (at most 0.1% of a material's UV area) are reported as warnings instead of blocking the mesh. Stacked UV islands and missing, non-finite or out-of-tile UVs are still rejected.
+- Restore the elapsed-time progress estimate for GPT Image 2 generations, including Smart fill, instead of an indeterminate bar.
+- Add **Auto apply** (on by default) to project each generated image as soon as it is ready; undo remains available. Disable it to inspect and mask candidates first. The setting is saved in the project.
+- Smart fill hides the green targeted-gap overlay once its candidate is ready, so the filled result is visible; a new preview shows the targets again.
+
 ### 1.4.0 — Smart fill
 
 - Match repair colors to accepted hole boundaries across the whole hole, preserving generated texture variation and exact existing paint. Cached candidates can be reprocessed without another AI request.

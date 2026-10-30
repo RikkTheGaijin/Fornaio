@@ -141,8 +141,8 @@ class CloudImageTests : public QObject {
             const auto event = arguments.first().value<QJsonObject>();
             if (event["event"] != "progress")
                 continue;
-            QVERIFY(event["indeterminate"].toBool());
-            QVERIFY(event["fraction"].toDouble() < 0);
+            QVERIFY(!event["indeterminate"].toBool());
+            QVERIFY(event["fraction"].toDouble(-1) >= 0 && event["fraction"].toDouble() <= .95);
             QVERIFY(event["elapsedSeconds"].toDouble(-1) >= 0);
             QVERIFY(event["phaseSeconds"].toDouble(-1) >= 0);
             QVERIFY(!event["phase"].toString().isEmpty());

@@ -616,17 +616,20 @@ QStringList validateAiMesh(const Scene &s, int uv, QStringList *warnings) {
     QStringList errors;
     QMap<QString, Scene> groups;
     QMap<QString, int> collapsed;
+    QMap<QString, double> uvArea;
     for (const Triangle &t : s.tris) {
         const QString material = aiMaterial(s, t);
         // Zero-area UV faces own no texels and projection skips them, so they cannot
         // corrupt the atlas; generated meshes with quantized UVs routinely contain a few.
         if (uv >= 0 && uv < (int)t.uv.size()) {
             const auto &a = t.uv[uv];
-            if (std::isfinite(a[0].x + a[0].y + a[1].x + a[1].y + a[2].x + a[2].y) &&
-                fabsf(orient(a[0], a[1], a[2])) < 1e-16f) {
+            const float area = fabsf(orient(a[0], a[1], a[2]));
+            if (std::isfinite(a[0].x + a[0].y + a[1].x + a[1].y + a[2].x + a[2].y) && area < 1e-16f) {
                 ++collapsed[material];
                 continue;
             }
+            if (std::isfinite(area))
+                uvArea[material] += area * .5;
         }
         groups[material].tris.push_back(t);
     }
@@ -634,16 +637,31 @@ QStringList validateAiMesh(const Scene &s, int uv, QStringList *warnings) {
         it->uvNames = s.uvNames;
         Settings settings;
         settings.maskUV = settings.aoUV = uv;
-        // Overlapping texels just receive the same projected paint twice: warn, don't block.
-        settings.averageOverlaps = true;
-        const Validation v = validate(*it, settings);
+        settings.averageOverlaps = false;
+        Validation v = validate(*it, settings);
+        // Quantized UVs leave sliver overlaps worth a few texels that only receive the same paint
+        // twice; stacked islands (a shared UV set) still block because they would paint together.
+        double overlap = 0;
+        for (const auto &o : v.overlaps)
+            overlap += o.area;
+        const bool slivers =
+            !v.overlaps.empty() && !v.overlapScanLimited && overlap <= uvArea.value(it.key()) * 1e-3;
+        if (slivers) {
+            v.errors.erase(std::remove_if(v.errors.begin(), v.errors.end(),
+                                          [](const QString &e) {
+                                              return e.startsWith("AO UV faces overlap") ||
+                                                     e.startsWith("First overlap") ||
+                                                     e == "Select a unique, non-overlapping UV set.";
+                                          }),
+                           v.errors.end());
+            if (warnings)
+                *warnings << QString("%1: %2 sliver Texture UV overlaps (%3 texels at 4096) share paint.")
+                                 .arg(it.key())
+                                 .arg(v.overlaps.size())
+                                 .arg(std::max(1., std::round(overlap * 4096 * 4096)));
+        }
         for (QString e : v.errors)
             errors << it.key() + ": " + e.replace("AO UV", "Texture UV");
-        if (warnings && !v.overlaps.empty())
-            *warnings << QString("%1: %2%3 overlapping Texture UV triangle pairs share paint.")
-                             .arg(it.key())
-                             .arg(v.overlapScanLimited ? "at least " : "")
-                             .arg(v.overlaps.size());
     }
     if (warnings)
         for (auto it = collapsed.begin(); it != collapsed.end(); ++it)

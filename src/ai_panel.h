@@ -62,6 +62,7 @@ class AiPanel : public QWidget {
     QJsonObject pendingSmartFill_; // Independent of the pending camera candidate.
     QPointer<QDialog> smartFillDialog_;
     AiMaskCanvas *smartFillCanvas_ = nullptr;
+    QCheckBox *smartFillTargets_ = nullptr;
     TransferViewport *smartFillView_ = nullptr;
     QComboBox *smartFillMaterial_ = nullptr;
     QLabel *smartFillInfo_ = nullptr;
@@ -122,7 +123,7 @@ class AiPanel : public QWidget {
     QSpinBox *seed_, *brush_, *projectionStrength_, *projectionFeather_, *angleFalloff_, *continuity_,
         *projectionAngle_, *cameraFov_;
     QCheckBox *colorMatch_, *randomSeed_, *showUncovered_, *protectDetails_, *fillGaps_, *coverAll_,
-        *orthographic_;
+        *orthographic_, *autoApply_;
     QProgressBar *progress_;
     QPushButton *install_, *cancelButton_, *generate_, *project_, *undoButton_, *redoButton_, *export_;
     QTabWidget *previews_;
